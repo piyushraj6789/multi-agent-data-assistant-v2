@@ -73,67 +73,91 @@ flowchart TD
     ResA --> Eval
     Eval --> UI
     RA --> ChromaDB
-    SA --> Haiku
+    SA <--> Haiku
     SA --> DB
-    KpiA --> Haiku
+    KpiA <--> Haiku
     KpiA --> DB
-    DocA --> Haiku
-    ResA --> Haiku
-    Eval --> Haiku
+    DocA <--> Haiku
+    ResA <--> Haiku
+    Eval <--> Haiku
 ```
 
 ### High-Level Block Diagram
 
 ```mermaid
-flowchart TB
+%%{init: {'themeVariables': {'fontSize': '28px'}}}%%
+flowchart LR
     subgraph UserLayer["User Layer"]
-        Browser["Browser / Streamlit Chat"]
+        Browser["Browser / Streamlit"]
     end
+
     subgraph AppLayer["Application Layer"]
-        Sidebar["Role Selector"]
         ChatUI["Chat Interface"]
+        Sidebar["Role Selector"]
     end
+
     subgraph AgentLayer["Agent Layer — LangGraph"]
+        GR["Guardrail"]
         IC["Intent Classifier"]
         RA["Retrieval Agent"]
-        SA["SQL Agent"]
-        DocA["Doc Answer"]
-        KpiA["KPI Compute Agent"]
+        subgraph SpecAgents["Specialized Agents"]
+            SA["SQL Agent"]
+            DocA["Doc Answer"]
+            KpiA["KPI Agent"]
+        end
         ResA["Response Agent"]
         Eval["Evaluator"]
     end
+
     subgraph DataLayer["Data Layer"]
-        ChromaDB["ChromaDB"]
         PDFs["PDF Docs"]
+        ChromaDB["ChromaDB"]
     end
+
     subgraph DBLayer["Databricks Layer"]
         TPCH["samples.tpch"]
+        AuditLog["Audit Log (Delta)"]
     end
+
     subgraph LLMLayer["LLM Layer"]
         Haiku["Claude Haiku"]
     end
+
     subgraph CfgLayer["Config Layer"]
-        RBAC["RBAC config"]
+        RBAC["RBAC Config"]
     end
+
     Browser --> ChatUI
-    ChatUI --> IC
+    Sidebar --> RBAC
+    ChatUI --> GR
+    GR -->|"relevant"| IC
+    GR -->|"out_of_scope"| Browser
     IC --> RA
-    RA --> SA
-    RA --> DocA
-    RA --> KpiA
-    SA --> ResA
-    DocA --> ResA
-    KpiA --> ResA
+    RA --> SA & DocA & KpiA
+    SA & DocA & KpiA --> ResA
     ResA --> Eval
     Eval --> Browser
-    RA --> ChromaDB
+    Eval --> AuditLog
     PDFs --> ChromaDB
-    SA --> TPCH
-    SA --> Haiku
-    DocA --> Haiku
-    ResA --> Haiku
-    Eval --> Haiku
-    IC --> RBAC
+    RA <--> ChromaDB
+    SA & KpiA --> TPCH
+    SA <--> Haiku
+    DocA <--> Haiku
+    KpiA <--> Haiku
+    ResA <--> Haiku
+    Eval <--> Haiku
+
+    classDef agent fill:#1e3a5f,stroke:#38bdf8,color:#fff
+    classDef llm fill:#3b1f5e,stroke:#a78bfa,color:#fff
+    classDef data fill:#1a3a2a,stroke:#34d399,color:#fff
+    classDef cfg fill:#3d2010,stroke:#fb923c,color:#fff
+    classDef ui fill:#1f2937,stroke:#60a5fa,color:#fff
+
+    class GR,IC,RA,SA,DocA,KpiA,ResA,Eval agent
+    class Haiku llm
+    class ChromaDB,PDFs,TPCH,AuditLog data
+    class RBAC cfg
+    class Browser,ChatUI,Sidebar ui
 ```
 
 ---
