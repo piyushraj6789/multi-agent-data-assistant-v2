@@ -25,3 +25,6 @@ python-dotenv==1.2.2
 typing-extensions==4.15.0
 httpx==0.28.1
 pydantic==2.13.3
+
+# SQL AST parsing — write guard (Capstone 2, Objective 2b)
+sqlglot>=25.0.0

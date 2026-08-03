@@ -3,8 +3,44 @@
 import textwrap
 
 
-def sql_generation_prompt(user_role: str, schema_str: str, doc_context: str, question: str) -> str:
-    """Build the Claude Haiku prompt for generating a Databricks SQL query."""
+def _format_history(history: list[dict]) -> str:
+    """Format conversation history with full SQL so follow-up queries retain filters and tables."""
+    if not history:
+        return ""
+    lines = []
+    for i, turn in enumerate(history, 1):
+        sql = (turn.get("generated_sql") or "").replace("\n", " ").strip()
+        summary = (turn.get("result_summary") or "").replace("\n", " ")[:150]
+        lines.append(
+            f"Turn {i} ({turn.get('intent', '?')}): Q='{turn.get('question', '')}'"
+            f"\n  SQL={sql}"
+            f"\n  Result={summary}"
+        )
+    return "\n".join(lines)
+
+
+def sql_generation_prompt(
+    user_role: str,
+    schema_str: str,
+    doc_context: str,
+    question: str,
+    history: list[dict] | None = None,
+) -> str:
+    """Build the Claude Haiku prompt for generating a Databricks SQL query.
+
+    history (Objective 1): optional list of prior turns to inject as context.
+    """
+    history_block = ""
+    if history:
+        history_block = (
+            f"\nConversation history (prior turns):\n{_format_history(history)}\n\n"
+            "Follow-up rule: if the current question is a refinement of a prior turn "
+            "(e.g. 'top 5', 'just show X', 'break that down by'), start from the most "
+            "recent turn's SQL and modify ONLY what changed. Keep all tables, JOINs, "
+            "WHERE filters, and GROUP BY from the prior SQL unless the user explicitly "
+            "removes them.\n"
+        )
+
     return textwrap.dedent(f"""
         You are a Databricks SQL expert.
 
@@ -14,7 +50,7 @@ def sql_generation_prompt(user_role: str, schema_str: str, doc_context: str, que
 
         Business context from documentation:
         {doc_context}
-
+        {history_block}
         IMPORTANT — Dataset date range:
         The samples.tpch dataset contains data with order dates between 1992 and 1998.
         There is NO data beyond 1998. Interpret relative time references against 1998.
@@ -53,8 +89,19 @@ def sql_generation_prompt(user_role: str, schema_str: str, doc_context: str, que
     """).strip()
 
 
-def doc_answer_prompt(doc_context: str, question: str) -> str:
-    """Build the prompt for answering a definition question from PDF context."""
+def doc_answer_prompt(
+    doc_context: str,
+    question: str,
+    history: list[dict] | None = None,
+) -> str:
+    """Build the prompt for answering a definition question from PDF context.
+
+    history (Objective 1): optional prior turns to resolve follow-up references.
+    """
+    history_block = ""
+    if history:
+        history_block = f"\nConversation history:\n{_format_history(history)}\n"
+
     return textwrap.dedent(f"""
         Answer the following question using ONLY the context below.
         Always follow this exact output format — no extra sections, no deviations:
@@ -75,7 +122,7 @@ def doc_answer_prompt(doc_context: str, question: str) -> str:
 
         Context:
         {doc_context}
-
+        {history_block}
         Question: {question}
 
         Answer:
@@ -127,28 +174,47 @@ def relevance_score_prompt(question: str, answer: str, has_data: bool = False) -
     """).strip()
 
 
-def sql_fix_prompt(sql: str, error: str, question: str) -> str:
-    """Build the prompt for asking Claude Haiku to fix a broken SQL query."""
+def sql_fix_prompt(sql: str, error: str, question: str, schema_str: str = "") -> str:
+    """Build the prompt for asking Claude Haiku to fix a broken SQL query.
+
+    schema_str: optional — pass the role-filtered schema so Haiku doesn't substitute
+    wrong catalog/schema names (e.g. main.default.*) when rewriting the query.
+    """
+    schema_section = f"\nAllowed tables (use ONLY these, with samples.tpch prefix):\n{schema_str}\n" if schema_str else ""
     return textwrap.dedent(f"""
-        Fix this Databricks SQL:
+        Fix this Databricks SQL so it runs on Databricks.
+        Use ONLY fully qualified table names: samples.tpch.<table>.
+        {schema_section}
+        Broken SQL:
         {sql}
 
         Error: {error}
-        Question: {question}
+        Original question: {question}
 
-        Return ONLY the corrected SQL.
+        Return ONLY the corrected SQL, no explanation.
     """).strip()
 
 
-def kpi_formula_extract_prompt(doc_context: str, question: str) -> str:
-    """Step 1 of kpi_agent: extract the KPI formula from PDF context."""
+def kpi_formula_extract_prompt(
+    doc_context: str,
+    question: str,
+    history: list[dict] | None = None,
+) -> str:
+    """Step 1 of kpi_agent: extract the KPI formula from PDF context.
+
+    history (Objective 1): optional prior turns to resolve follow-up KPI references.
+    """
+    history_block = ""
+    if history:
+        history_block = f"\nConversation history:\n{_format_history(history)}\n"
+
     return textwrap.dedent(f"""
         From the documentation below, extract the calculation formula for the KPI
         the user is asking about.
 
         Documentation:
         {doc_context}
-
+        {history_block}
         Question: {question}
 
         Return ONLY a concise formula description.

@@ -27,12 +27,21 @@ DOMAIN_KEYWORDS: list[str] = [
     "tpch", "tpc-h", "databricks",
 ]
 
-# Definition-style questions ("what is X?") get a pass even without domain
-# terms, because the cost of a ChromaDB miss is low and the LLM responds
-# gracefully when no relevant docs are found.
+# Definition-style questions ("what is X?") get a pass — UNLESS the subject
+# is clearly outside the business-data domain (weather, sports, etc.).
 DOC_KEYWORDS: list[str] = [
     "what is", "what was", "define", "definition",
     "how is", "what does", "explain", "meaning of", "describe",
+]
+
+# Questions containing any of these AND no domain term are rejected immediately.
+OFF_TOPIC_MARKERS: list[str] = [
+    "weather", "forecast", "temperature", "rain", "snow", "sunny",
+    "sport", "cricket", "football", "soccer", "basketball", "tennis",
+    "movie", "film", "actor", "actress", "celebrity", "song", "music",
+    "recipe", "food", "restaurant", "cooking", "travel", "hotel",
+    "politics", "election", "president", "government",
+    "stock price", "bitcoin", "crypto",
 ]
 
 _OUT_OF_SCOPE_MSG = (
@@ -47,14 +56,16 @@ def check_relevance(state: AgentState) -> AgentState:
     """Block queries with no TPC-H domain terms; let definition questions pass."""
     q = state["question"].lower()
 
-    has_domain = any(kw in q for kw in DOMAIN_KEYWORDS)
-    has_doc    = any(kw in q for kw in DOC_KEYWORDS)
+    has_domain   = any(kw in q for kw in DOMAIN_KEYWORDS)
+    has_doc      = any(kw in q for kw in DOC_KEYWORDS)
+    is_off_topic = any(kw in q for kw in OFF_TOPIC_MARKERS)
+
+    # Off-topic markers always block — even when domain words appear incidentally
+    # ("weather forecast for the orders region" is still a weather question).
+    if is_off_topic:
+        return {**state, "intent": "out_of_scope", "final_answer": _OUT_OF_SCOPE_MSG}
 
     if has_domain or has_doc:
         return state  # relevant — proceed normally
 
-    return {
-        **state,
-        "intent":       "out_of_scope",
-        "final_answer": _OUT_OF_SCOPE_MSG,
-    }
+    return {**state, "intent": "out_of_scope", "final_answer": _OUT_OF_SCOPE_MSG}

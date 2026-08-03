@@ -4,6 +4,7 @@ from langgraph.graph import StateGraph, END
 
 from agents.state import AgentState
 from config.prompts import doc_answer_prompt
+from agents.sanitizer import sanitize_input
 from agents.guardrail import check_relevance
 from agents.intent_classifier import classify_intent
 from agents.retrieval_agent import retrieve_context
@@ -54,17 +55,19 @@ def build_graph() -> StateGraph:
     """Construct and compile the LangGraph agent graph (batch mode, used by eval/tests)."""
     graph = StateGraph(AgentState)
 
-    graph.add_node("guardrail",          check_relevance)
-    graph.add_node("classify_intent",    classify_intent)
-    graph.add_node("retrieve_context",   retrieve_context)
-    graph.add_node("load_schema",        _load_schema)
+    graph.add_node("sanitize_input",      sanitize_input)    # Objective 2a: entry node
+    graph.add_node("guardrail",           check_relevance)
+    graph.add_node("classify_intent",     classify_intent)
+    graph.add_node("retrieve_context",    retrieve_context)
+    graph.add_node("load_schema",         _load_schema)
     graph.add_node("answer_doc_question", _answer_doc_question)
-    graph.add_node("run_sql_agent",      run_sql_agent)
-    graph.add_node("kpi_agent",          run_kpi_agent)
-    graph.add_node("format_response",    format_response)
-    graph.add_node("evaluate_result",    evaluate_result)
+    graph.add_node("run_sql_agent",       run_sql_agent)
+    graph.add_node("kpi_agent",           run_kpi_agent)
+    graph.add_node("format_response",     format_response)
+    graph.add_node("evaluate_result",     evaluate_result)
 
-    graph.set_entry_point("guardrail")
+    graph.set_entry_point("sanitize_input")
+    graph.add_edge("sanitize_input", "guardrail")
 
     graph.add_conditional_edges(
         "guardrail",
@@ -113,6 +116,7 @@ def build_base_graph() -> StateGraph:
     """
     graph = StateGraph(AgentState)
 
+    graph.add_node("sanitize_input",   sanitize_input)    # Objective 2a: entry node
     graph.add_node("guardrail",        check_relevance)
     graph.add_node("classify_intent",  classify_intent)
     graph.add_node("retrieve_context", retrieve_context)
@@ -120,7 +124,8 @@ def build_base_graph() -> StateGraph:
     graph.add_node("run_sql_agent",    run_sql_agent)
     graph.add_node("kpi_agent",        run_kpi_agent)
 
-    graph.set_entry_point("guardrail")
+    graph.set_entry_point("sanitize_input")
+    graph.add_edge("sanitize_input", "guardrail")
 
     graph.add_conditional_edges(
         "guardrail",

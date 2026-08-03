@@ -2,18 +2,22 @@
 
 from agents.state import AgentState
 from config.prompts import relevance_score_prompt
-from config.settings import APP_MODEL, APP_MAX_TOKENS_EVAL, TEMP_EVAL
+from config.settings import APP_MODEL_EVAL, APP_MAX_TOKENS_EVAL, TEMP_EVAL
 from utils.audit import add_tokens
 from utils.llm_client import llm_client as _client
 
 
 def _score_relevance(question: str, answer: str, has_data: bool = False):
-    """Ask Claude Haiku to rate answer relevance (1–5); return (score, usage_object)."""
+    """Ask Claude Sonnet to rate answer relevance (1–5); return (score, usage_object).
+
+    Objective 3: uses APP_MODEL_EVAL (Sonnet) instead of APP_MODEL (Haiku) so a
+    different model judges Haiku's output, eliminating correlated self-grading bias.
+    """
     if not answer.strip():
         return 1, None
     prompt = relevance_score_prompt(question, answer, has_data)
     resp = _client.messages.create(
-        model=APP_MODEL,
+        model=APP_MODEL_EVAL,
         max_tokens=APP_MAX_TOKENS_EVAL,
         temperature=TEMP_EVAL,
         messages=[{"role": "user", "content": prompt}],

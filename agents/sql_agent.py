@@ -3,7 +3,7 @@
 from agents.state import AgentState
 from config.rbac import get_allowed_tables, check_metric_access
 from config.prompts import sql_generation_prompt
-from db.execute import run_with_correction, extract_sql
+from db.execute import run_with_correction, extract_sql, WriteGuardError, _check_write_guard
 from config.settings import APP_MODEL, APP_MAX_TOKENS_SQL, TEMP_SQL
 from utils.audit import add_tokens
 from utils.llm_client import llm_client as _client
@@ -18,10 +18,19 @@ def _build_schema_str(schema: dict) -> str:
     return "\n".join(lines)
 
 
-def _generate_sql(question: str, user_role: str, schema: dict, doc_context: str):
-    """Send the prompt to Claude Haiku; return (sql_string, usage_object)."""
+def _generate_sql(
+    question: str,
+    user_role: str,
+    schema: dict,
+    doc_context: str,
+    history: list[dict] | None = None,
+):
+    """Send the prompt to Claude Haiku; return (sql_string, usage_object).
+
+    history (Objective 1): passed through to sql_generation_prompt for follow-up context.
+    """
     schema_str = _build_schema_str(schema)
-    prompt = sql_generation_prompt(user_role, schema_str, doc_context, question)
+    prompt = sql_generation_prompt(user_role, schema_str, doc_context, question, history=history)
     response = _client.messages.create(
         model=APP_MODEL,
         max_tokens=APP_MAX_TOKENS_SQL,
@@ -51,12 +60,17 @@ def run_sql_agent(state: AgentState) -> AgentState:
     """Generate SQL with Haiku, validate RBAC, execute with self-correction, store DataFrame."""
     tu = state.get("token_usage") or {}
     try:
+        # Pre-check: if the user typed raw mutation SQL as the question, block before Haiku runs.
+        # Without this, Haiku refuses to generate the SQL → produces a refusal string →
+        # the correction loop converts that refusal into a valid SELECT → mutation bypassed.
+        _check_write_guard(state["question"])
         check_metric_access(state["question"], state["user_role"])
         sql, gen_usage = _generate_sql(
             question=state["question"],
             user_role=state["user_role"],
             schema=state.get("schema", {}),
             doc_context=state.get("doc_context", ""),
+            history=state.get("history") or [],
         )
         tu = add_tokens(tu, "sql_generation", gen_usage)
         _check_rbac(sql, state["user_role"])

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
-from config.settings import AUDIT_CATALOG, AUDIT_SCHEMA, AUDIT_TABLE
+from config.settings import AUDIT_CATALOG, AUDIT_SCHEMA, AUDIT_TABLE, APP_MODEL, APP_MODEL_EVAL
 from db.connection import get_connection
 
 load_dotenv()
@@ -49,9 +49,17 @@ def _ensure_table() -> None:
                     answer_preview      STRING,
                     total_input_tokens  INT,
                     total_output_tokens INT,
-                    token_calls         STRING
+                    token_calls         STRING,
+                    generator_model     STRING,
+                    evaluator_model     STRING
                 )
             """)
+            # Add columns to existing tables that predate this schema version
+            for col, typ in [("generator_model", "STRING"), ("evaluator_model", "STRING")]:
+                try:
+                    cursor.execute(f"ALTER TABLE {AUDIT_TABLE} ADD COLUMN {col} {typ}")
+                except Exception:
+                    pass  # column already exists
     finally:
         conn.close()
     _table_ensured = True
@@ -69,7 +77,7 @@ def log_query(question: str, user_role: str, result: dict) -> None:
             with conn.cursor() as cursor:
                 cursor.execute(
                     f"INSERT INTO {AUDIT_TABLE} VALUES "
-                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         ts,
                         question,
@@ -84,6 +92,8 @@ def log_query(question: str, user_role: str, result: dict) -> None:
                         tu.get("total_input",  0),
                         tu.get("total_output", 0),
                         json.dumps(tu.get("calls", [])),
+                        APP_MODEL,
+                        APP_MODEL_EVAL,
                     ],
                 )
         finally:

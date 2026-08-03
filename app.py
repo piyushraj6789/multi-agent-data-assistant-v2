@@ -12,7 +12,7 @@ from config.rbac import get_allowed_tables, ROLE_CONFIG
 from utils.audit import log_query
 
 st.set_page_config(
-    page_title="Data Assistant",
+    page_title="Multi-Agent Data Assistant with Guardrails & Observability",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -156,6 +156,9 @@ def _init_session() -> None:
         st.session_state.role = "analyst"
     if "pending_question" not in st.session_state:
         st.session_state.pending_question = None
+    # Objective 1: persist conversation history across Streamlit reruns
+    if "history" not in st.session_state:
+        st.session_state.history = []
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -173,6 +176,7 @@ def _render_sidebar() -> None:
     if selected != st.session_state.role:
         st.session_state.role = selected
         st.session_state.messages = []
+        st.session_state.history = []   # Objective 1: role switch resets conversation memory
         st.rerun()
 
     desc = ROLE_CONFIG[selected]["description"]
@@ -210,8 +214,10 @@ def _render_sidebar() -> None:
         )
 
     st.sidebar.markdown("---")
+    st.sidebar.link_button("📊 Open Monitoring Dashboard", "http://localhost:8503", use_container_width=True)
     if st.sidebar.button("🗑️  Clear chat", use_container_width=True):
         st.session_state.messages = []
+        st.session_state.history = []   # Objective 1: clear also resets history
         st.rerun()
 
 
@@ -233,14 +239,19 @@ def _run_graph(question: str, role: str) -> dict:
     Does NO LLM answer-generation — only the data-fetching nodes
     (intent classification, RAG retrieval, schema load, SQL execution).
     The answer is streamed separately so the user sees tokens as they arrive.
+
+    Objective 1: seeds the graph with the session's conversation history so
+    follow-up questions have prior-turn context available.
     """
-    final_state: dict = {"question": question, "user_role": role}
+    init: dict = {
+        "question":  question,
+        "user_role": role,
+        "history":   list(st.session_state.get("history", [])),
+    }
+    final_state: dict = dict(init)
     with st.spinner("Thinking…"):
         try:
-            for chunk in agent_graph_base.stream(
-                {"question": question, "user_role": role},
-                stream_mode="updates",
-            ):
+            for chunk in agent_graph_base.stream(init, stream_mode="updates"):
                 for _, state_update in chunk.items():
                     final_state = {**final_state, **state_update}
         except Exception as e:
@@ -327,7 +338,7 @@ def main() -> None:
     role = st.session_state.role
     st.markdown(
         f'<div class="main-header">'
-        f'<h1>🤖 Data Assistant</h1>'
+        f'<h1>Multi-Agent Data Assistant with Guardrails &amp; Observability</h1>'
         f'<p>Logged in as <b>{role}</b> · ask anything about your data in plain English.</p>'
         f'</div>',
         unsafe_allow_html=True,
@@ -430,9 +441,27 @@ def main() -> None:
                 with st.expander("📋 View generated SQL"):
                     st.code(sql, language="sql")
 
+            # Objective 1: the UI uses agent_graph_base (streaming graph) which does NOT
+            # include format_response, so history is never updated inside the graph.
+            # Always append the completed turn manually here.
+            if answer_text:
+                from config.settings import APP_HISTORY_TURNS
+                prior = list(st.session_state.history)
+                prior.append({
+                    "question":       question,
+                    "intent":         final_state.get("intent", ""),
+                    "generated_sql":  final_state.get("generated_sql", ""),
+                    "result_summary": answer_text[:200],
+                })
+                st.session_state.history = prior[-APP_HISTORY_TURNS:]
+
             final_msg = msgs[placeholder_idx]
             _render_meta(final_msg)
-            log_query(question, role, final_msg)
+            log_query(question, role, {
+                **final_msg,
+                "answer":      final_msg.get("content", ""),
+                "token_usage": final_state.get("token_usage", {}),
+            })
 
 
 if __name__ == "__main__":

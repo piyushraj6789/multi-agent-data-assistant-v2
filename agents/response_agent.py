@@ -4,7 +4,10 @@ from collections.abc import Generator
 
 from agents.state import AgentState
 from config.prompts import dataframe_summary_prompt, doc_answer_prompt
-from config.settings import APP_MODEL, APP_MAX_TOKENS_RESPONSE, APP_MAX_TOKENS_ANSWER, TEMP_ANSWER
+from config.settings import (
+    APP_MODEL, APP_MAX_TOKENS_RESPONSE, APP_MAX_TOKENS_ANSWER,
+    TEMP_ANSWER, APP_HISTORY_TURNS,
+)
 from utils.audit import add_tokens
 from utils.llm_client import llm_client as _client
 
@@ -23,6 +26,22 @@ def _summarise_dataframe(state: AgentState):
         messages=[{"role": "user", "content": dataframe_summary_prompt(table_str, state["question"])}],
     )
     return response.content[0].text.strip(), response.usage
+
+
+def _friendly_error(error: str) -> str:
+    """Convert a technical error string into a plain-English user message."""
+    low = error.lower()
+    if "mutating statement" in low or "mutating command" in low:
+        return (
+            "I cannot execute this query. It contains a write or DDL operation "
+            "(DELETE, INSERT, UPDATE, MERGE, DROP, etc.), which is not allowed. "
+            "Please rephrase as a SELECT query."
+        )
+    if "rbac violation" in low or "not allowed to access" in low:
+        return f"Access denied: your role does not have permission to query those tables."
+    if "sql failed after" in low:
+        return "The query could not be executed after multiple correction attempts. Please try rephrasing."
+    return f"Something went wrong: {error}"
 
 
 def stream_answer(state: AgentState) -> Generator[str, None, None]:
@@ -46,12 +65,20 @@ def stream_answer(state: AgentState) -> Generator[str, None, None]:
             model=APP_MODEL,
             max_tokens=APP_MAX_TOKENS_ANSWER,
             temperature=TEMP_ANSWER,
-            messages=[{"role": "user", "content": doc_answer_prompt(doc_context, state["question"])}],
+            messages=[{
+                "role": "user",
+                "content": doc_answer_prompt(doc_context, state["question"], history=state.get("history") or []),
+            }],
         ) as stream:
             yield from stream.text_stream
         return
 
-    # sql_query or kpi_compute — summarise the result DataFrame
+    # sql_query or kpi_compute — check for errors before trying the DataFrame
+    error = state.get("error", "")
+    if error:
+        yield _friendly_error(error)
+        return
+
     df = state.get("result_df")
     if df is None or df.empty:
         yield "The query returned no results."
@@ -90,4 +117,14 @@ def format_response(state: AgentState) -> AgentState:
         if usage:
             tu = add_tokens(tu, "df_summary", usage)
 
-    return {**state, "final_answer": final_answer, "token_usage": tu}
+    # Objective 1: append this turn to history, keeping only the last APP_HISTORY_TURNS entries.
+    prior_history: list[dict] = list(state.get("history") or [])
+    new_turn: dict = {
+        "question":       state.get("question", ""),
+        "intent":         intent,
+        "generated_sql":  state.get("generated_sql", ""),
+        "result_summary": final_answer[:200],   # compact — don't paste full DataFrames
+    }
+    history = (prior_history + [new_turn])[-APP_HISTORY_TURNS:]
+
+    return {**state, "final_answer": final_answer, "token_usage": tu, "history": history}

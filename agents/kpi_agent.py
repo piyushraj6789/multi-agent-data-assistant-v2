@@ -9,13 +9,20 @@ from utils.audit import add_tokens
 from utils.llm_client import llm_client as _client
 
 
-def _extract_formula(doc_context: str, question: str) -> tuple[str, object]:
-    """Step 1: ask Haiku to pull the KPI formula from PDF chunks. Returns (formula, usage)."""
+def _extract_formula(
+    doc_context: str,
+    question: str,
+    history: list[dict] | None = None,
+) -> tuple[str, object]:
+    """Step 1: ask Haiku to pull the KPI formula from PDF chunks. Returns (formula, usage).
+
+    history (Objective 1): passed to the prompt so follow-up KPI references resolve correctly.
+    """
     response = _client.messages.create(
         model=APP_MODEL,
         max_tokens=APP_MAX_TOKENS_ANSWER,
         temperature=TEMP_ANSWER,
-        messages=[{"role": "user", "content": kpi_formula_extract_prompt(doc_context, question)}],
+        messages=[{"role": "user", "content": kpi_formula_extract_prompt(doc_context, question, history=history)}],
     )
     return response.content[0].text.strip(), response.usage
 
@@ -39,7 +46,9 @@ def run_kpi_agent(state: AgentState) -> AgentState:
         schema_str = _build_schema_str(state.get("schema", {}))
 
         # Step 1 — extract KPI formula from RAG context
-        kpi_formula, formula_usage = _extract_formula(doc_context, state["question"])
+        kpi_formula, formula_usage = _extract_formula(
+            doc_context, state["question"], history=state.get("history") or []
+        )
         tu = add_tokens(tu, "kpi_formula", formula_usage)
 
         # Step 2 — generate SQL using the extracted formula

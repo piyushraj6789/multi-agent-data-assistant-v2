@@ -1,6 +1,7 @@
 # Multi-Agent Data Assistant — Architecture & Documentation
 
-> Capstone 1 | AI-08 | REVA University (RACE), Bengaluru
+> Capstone 2 | AI-08 | REVA University (RACE), Bengaluru  
+> (Extends Capstone 1 with four objectives: Multi-Turn Memory · Security Hardening · Cross-Model Evaluator · Live Audit Dashboard)
 
 ---
 
@@ -36,6 +37,60 @@ The system automatically decides **what kind of question it is**, routes it to t
 | **KPI Definition** | "What is Average Order Value?" | Searches PDF knowledge base, returns definition |
 | **KPI Computation** | "What is the Average Days to Ship for Q3 1996?" | Extracts KPI formula from PDF, then computes via SQL |
 | **SQL Query** | "What was total revenue by nation in 1997?" | Generates & runs SQL on Databricks |
+
+---
+
+## Capstone 2 Additions
+
+### Objective 1 — Multi-Turn Conversational Memory
+
+`AgentState` now carries a `history` list (capped at `APP_HISTORY_TURNS = 4`).  
+`agents/response_agent.py` appends each completed turn before returning.  
+On the next Streamlit message, `app.py` seeds the graph with the saved history, and  
+`config/prompts.py` injects it compactly into the SQL, KPI, and doc-answer prompts.
+
+```
+Turn N graph call
+  ┌─────────────────────────────────┐
+  │  initial state: history=[T1..TN-1] │
+  │  sanitize_input → guardrail → …    │
+  │  response_agent: append TN to history │
+  │  final state: history=[T2..TN]    │  (oldest trimmed)
+  └─────────────────────────────────┘
+```
+
+### Objective 2 — Security Hardening
+
+**2a. Prompt Injection Sanitization** (`agents/sanitizer.py`)  
+New first node in both graphs. Strips `INJECTION_PATTERNS` (configured in `config/settings.py`)  
+and truncates to `APP_MAX_INPUT_CHARS = 500`. The `sanitize_text()` helper is also called by  
+`retrieval_agent.py` on PDF chunks and `db/execute.py` on DB error strings before they reach any LLM prompt.
+
+**2b. AST-Based SQL Write Guard** (`db/execute.py`)  
+Replaced the old first-token string check with `sqlglot.parse_one(sql, dialect="databricks")`.  
+Walks the full AST for `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `GRANT`, `REVOKE`, `DROP`,  
+`ALTER`, `CREATE`, `TRUNCATE` — catches them even inside a `WITH` clause. Fails closed  
+if sqlglot cannot parse the statement.
+
+### Objective 3 — Cross-Model Evaluator
+
+`agents/evaluator.py` now uses `APP_MODEL_EVAL = "claude-sonnet-4-6"` (set in `config/settings.py`)  
+instead of the generation model (Haiku). Same prompt, same 0–5 rubric — only the model changes.  
+This eliminates the correlated self-grading bias documented in the Capstone 1 report.
+
+### Objective 4 — Live Audit Monitoring Dashboard
+
+`dashboard/monitoring.py` — a separate Streamlit entry point (`streamlit run dashboard/monitoring.py`).  
+Queries `data_assistant.audit.query_audit_log` via the existing `db/connection.py`.  
+Five charts: RBAC block rate over time, confidence score trend, self-correction frequency,  
+average latency by intent, and intent distribution. Read-only.
+
+### Updated Graph Entry Point
+
+```
+Capstone 1:  guardrail → classify_intent → ...
+Capstone 2:  sanitize_input → guardrail → classify_intent → ...
+```
 
 ---
 

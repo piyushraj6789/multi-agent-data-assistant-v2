@@ -24,9 +24,11 @@ def retrieve_context(state: AgentState) -> AgentState:
     question = state["question"]
 
     try:
+        from agents.sanitizer import sanitize_text
         collection = _get_collection()
         results = collection.query(query_texts=[question], n_results=CHROMA_N_RESULTS)
-        chunks: list[str] = results["documents"][0]
+        # Objective 2a: sanitize each retrieved chunk before it reaches any LLM prompt.
+        chunks: list[str] = [sanitize_text(c, max_chars=1000) for c in results["documents"][0]]
         doc_context = "\n\n---\n\n".join(chunks)
     except Exception as e:
         print(f"Warning: ChromaDB retrieval failed: {e}")

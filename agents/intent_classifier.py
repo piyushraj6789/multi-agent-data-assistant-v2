@@ -43,6 +43,8 @@ SQL_OVERRIDE_KEYWORDS: list[str] = [
 # Time qualifiers that indicate the user wants a computed value, not a definition.
 TIME_QUALIFIERS: list[str] = [
     "for q1", "for q2", "for q3", "for q4",
+    "in q1", "in q2", "in q3", "in q4",   # "AOV in Q1 1998" pattern
+    "q1 ", "q2 ", "q3 ", "q4 ",            # bare quarter reference
     "in 199", "in 200",          # catches "in 1995", "in 2003", etc.
     "for 19", "for 20",          # catches "for 1995", "for 2003", etc.
     "last year", "last quarter", "last month",
