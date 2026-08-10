@@ -26,7 +26,7 @@ def load_audit(window_sql: str | None) -> pd.DataFrame:
         SELECT ts, question, user_role, intent, eval_score, eval_notes,
                elapsed_sec, error, generated_sql, answer_preview,
                total_input_tokens, total_output_tokens,
-               token_calls, generator_model, evaluator_model
+               token_calls, generator_model, evaluator_model, feedback
         FROM {AUDIT_TABLE}
         {where}
         ORDER BY ts ASC

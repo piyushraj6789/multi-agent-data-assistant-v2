@@ -20,13 +20,21 @@ def _get_collection() -> chromadb.Collection:
 
 
 def retrieve_context(state: AgentState) -> AgentState:
-    """Query ChromaDB with the user's question and store top chunks in state['doc_context']."""
+    """Query ChromaDB with the user's question and store top chunks in state['doc_context'].
+
+    A bare follow-up ("calculate it for last year") carries no KPI name of its
+    own, so the embedding search finds nothing relevant on the raw question
+    alone. Prepending the prior turn's question grounds the query in whatever
+    "it" refers to, without changing behavior for a first turn (no history).
+    """
     question = state["question"]
+    history = state.get("history") or []
+    query_text = f"{history[-1]['question']} {question}" if history else question
 
     try:
         from agents.sanitizer import sanitize_text
         collection = _get_collection()
-        results = collection.query(query_texts=[question], n_results=CHROMA_N_RESULTS)
+        results = collection.query(query_texts=[query_text], n_results=CHROMA_N_RESULTS)
         # Objective 2a: sanitize each retrieved chunk before it reaches any LLM prompt.
         chunks: list[str] = [sanitize_text(c, max_chars=1000) for c in results["documents"][0]]
         doc_context = "\n\n---\n\n".join(chunks)

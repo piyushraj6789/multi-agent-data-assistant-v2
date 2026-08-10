@@ -68,4 +68,14 @@ def check_relevance(state: AgentState) -> AgentState:
     if has_domain or has_doc:
         return state  # relevant — proceed normally
 
+    # A prior turn in this session only reaches history once it passed the
+    # guardrail (out_of_scope questions end the graph before format_response
+    # appends to history). So a non-empty history means the conversation is
+    # already anchored in-domain, and short follow-ups like "for last year?"
+    # or "and last quarter?" carry no domain keyword of their own but still
+    # refer back to that anchor — only reject them if they explicitly pivot
+    # to an off-topic subject.
+    if state.get("history"):
+        return state
+
     return {**state, "intent": "out_of_scope", "final_answer": _OUT_OF_SCOPE_MSG}

@@ -217,9 +217,13 @@ def kpi_formula_extract_prompt(
         {history_block}
         Question: {question}
 
-        Return ONLY a concise formula description.
-        Example: "AOV = SUM(o_totalprice) / COUNT(o_orderkey)"
-        If no formula is found, return: "Formula not found in documentation."
+        If a prior turn in the conversation history already stated this KPI's
+        formula, reuse that exact formula rather than guessing a simpler one —
+        it is more reliable than a weak documentation match.
+
+        Return ONLY a concise formula description, e.g. "<KPI name> = <expression
+        using column names>". If no formula is found in either the documentation
+        or the history, return: "Formula not found in documentation."
     """).strip()
 
 

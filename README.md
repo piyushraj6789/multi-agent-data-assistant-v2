@@ -4,7 +4,7 @@ A conversational data assistant powered by Claude AI and LangGraph. Ask question
 
 ## Overview
 
-The assistant uses a multi-agent architecture with role-based access control (RBAC). Each user role (Analyst, Finance, Executive) can only query the tables they are authorised to access.
+The assistant uses a multi-agent architecture with role-based access control (RBAC). Each user role (Analyst, Finance, Executive) can only query the tables they are authorised to access. Conversation history carries across turns so follow-up questions ("calculate it for last year?") resolve against the prior turn, and every answer carries a thumbs up/down for human feedback, logged against its audit row for later review.
 
 **Three query types are supported:**
 
@@ -40,12 +40,14 @@ User question
 
 ## Tech Stack
 
-- **LLM:** Claude Haiku (`claude-haiku-4-5`) via Anthropic API
+- **LLM:** Claude Haiku (`claude-haiku-4-5`) via Anthropic API, Claude Sonnet as a cross-model evaluator
 - **Agent framework:** LangGraph
+- **Intent classification:** TF-IDF + Logistic Regression (scikit-learn), trained on ~1000 labeled questions, with a small rule-based fallback for context-free follow-ups
 - **Vector store:** ChromaDB
 - **Database:** Databricks SQL
-- **UI:** Streamlit
+- **UI:** Streamlit (single multipage app — chat + live audit dashboard)
 - **PDF parsing:** PyPDF
+- **SQL write guard:** sqlglot (AST-based statement-type detection)
 
 ## Setup
 
@@ -90,19 +92,34 @@ DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/...
 python data/ingest.py
 ```
 
-### 6. Run the app
+### 6. (Optional) Retrain the intent classifier
+
+A trained pipeline is already included at `data/intent_classifier.pkl`. Only needed if you
+change the training data or want to reproduce the accuracy report:
+
+```bash
+python data/generate_intent_dataset.py   # regenerate data/intent_training_data.json via Claude
+python data/train_intent_classifier.py   # retrain + save intent_classifier.pkl
+```
+
+### 7. Run the app
 
 ```bash
 streamlit run app.py
 ```
+
+The live audit dashboard is available inside the same app via the sidebar link, or directly
+at the `Monitoring Dashboard` page.
 
 ## Project Structure
 
 ```
 ├── agents/           # Individual agent nodes (intent classifier, SQL, KPI, etc.)
 ├── config/           # Settings, prompts, RBAC roles
-├── data/             # Document ingestion and ChromaDB storage
+├── data/             # Document ingestion, ChromaDB storage, intent classifier training data/model
 ├── db/               # Databricks connection and SQL execution
+├── dashboard/        # Audit dashboard rendering logic
+├── pages/            # Streamlit multipage entries (e.g. Monitoring Dashboard)
 ├── evaluation/       # Automated evaluation test cases and scorer
 ├── tests/            # Unit tests
 ├── utils/            # LLM client, audit logging

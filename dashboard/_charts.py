@@ -19,6 +19,16 @@ _PINK   = "#EC4899"   # role activity
 _TEAL   = "#14B8A6"   # Sonnet tokens
 _ROSE   = "#F43F5E"   # total cost
 
+# HITL feedback status triad — validated as an all-pairs-safe categorical set
+# (scripts/validate_palette.js from the dataviz skill), not the single ad-hoc
+# hue used per chart elsewhere in this file, since this is the one chart that
+# needs 3 distinguishable colors within a single plot.
+_FEEDBACK_COLORS = {
+    "Correct":     "#1baf7a",
+    "Incorrect":   "#eb6834",
+    "No feedback": "#2a78d6",
+}
+
 
 def prep_df(df: pd.DataFrame) -> pd.DataFrame:
     """Parse ts and add an 'hour' floor column for time-series grouping."""
@@ -97,6 +107,23 @@ def chart_model_token_split(df: pd.DataFrame) -> None:
         .reset_index()
     )
     st.line_chart(tok.set_index("hour"), color=[_PURPLE, _TEAL])
+
+
+def chart_feedback_distribution(df: pd.DataFrame) -> None:
+    """Bar (status triad): HITL thumbs feedback — correct / incorrect / not yet rated."""
+    st.subheader("HITL Feedback")
+    if "feedback" not in df.columns:
+        st.caption("No feedback data available.")
+        return
+    labels = df["feedback"].map({"correct": "Correct", "incorrect": "Incorrect"}).fillna("No feedback")
+    fc = (
+        labels.value_counts()
+        .reindex(["Correct", "Incorrect", "No feedback"], fill_value=0)
+        .reset_index()
+    )
+    fc.columns = ["Status", "Count"]
+    fc["Color"] = fc["Status"].map(_FEEDBACK_COLORS)
+    st.bar_chart(fc, x="Status", y="Count", color="Color")
 
 
 def chart_cost_over_time(df: pd.DataFrame) -> None:

@@ -80,10 +80,81 @@ This eliminates the correlated self-grading bias documented in the Capstone 1 re
 
 ### Objective 4 — Live Audit Monitoring Dashboard
 
-`dashboard/monitoring.py` — a separate Streamlit entry point (`streamlit run dashboard/monitoring.py`).  
-Queries `data_assistant.audit.query_audit_log` via the existing `db/connection.py`.  
-Five charts: RBAC block rate over time, confidence score trend, self-correction frequency,  
-average latency by intent, and intent distribution. Read-only.
+`dashboard/monitoring.py` holds the rendering logic (charts live in `dashboard/_charts.py`,  
+data loading in `dashboard/_data.py`). Queries `data_assistant.audit.query_audit_log` via the  
+existing `db/connection.py`. Six charts: RBAC block rate over time, confidence score trend,  
+self-correction frequency, average latency by intent, intent distribution, and HITL feedback  
+distribution (see below). Read-only.
+
+**Updated:** originally launched as a second, separate `streamlit run dashboard/monitoring.py`  
+process on its own port (8503). Now exposed as a native Streamlit **multipage** entry —  
+`pages/1_Monitoring_Dashboard.py` just calls `dashboard.monitoring.main()` — so it runs inside  
+the same app/port as `app.py`. Both pages cross-navigate with `st.page_link()` instead of  
+Streamlit's default sidebar page list: `app.py` → "📊 Open Monitoring Dashboard", dashboard →  
+"⬅️ Back to Assistant". The default page list itself is turned off via  
+`.streamlit/config.toml: [client] showSidebarNavigation = false` — an earlier attempt hid it  
+with a `[data-testid="stSidebarNav"] { display: none; }` CSS override injected per-page, but  
+that selector didn't reliably match the current DOM; the config-file flag is the actually-  
+supported mechanism.
+
+**HITL feedback loop (added after this objective shipped):** `utils/audit.py`'s audit table  
+gained a `row_id` (`uuid4().hex`, generated per insert) and a `feedback` column. `log_query()`  
+now returns the `row_id` it just wrote so the UI can reference that exact row later, and a new  
+`update_feedback(row_id, "correct" | "incorrect")` runs a point `UPDATE ... WHERE row_id = ?`.  
+`app.py: _render_feedback()` renders an `st.feedback("thumbs")` widget under every assistant  
+message once its `row_id` is known. This is logged only for now — not wired into any  
+auto-retry or self-correction loop — it feeds the same kind of manual  
+"review flagged rows → add corrective examples → retrain" workflow already used for the intent  
+classifier (Objective 5). `dashboard/_charts.py: chart_feedback_distribution()` renders it as a  
+3-bar breakdown (Correct / Incorrect / No feedback) using a palette-validated 3-color set.
+
+### Objective 5 (Stretch) — Trained Intent Classifier
+
+The keyword-rule `agents/intent_classifier.py` was replaced with a trained model:
+
+- `data/generate_intent_dataset.py` — asks Claude Sonnet for ~330 synthetic questions per  
+  intent (doc_lookup / kpi_compute / sql_query), merges in the 38 real UAT questions, writes  
+  `data/intent_training_data.json` (~1024 rows).
+- `data/train_intent_classifier.py` — fits `TfidfVectorizer(1,2-grams) + LogisticRegression`  
+  on an 85/15 stratified split, saves `data/intent_classifier.pkl`, and prints an accuracy  
+  comparison against the old keyword classifier (now preserved unchanged as  
+  `agents/intent_classifier_keyword.py`) run over the same held-out test set:
+
+  | Classifier | Accuracy (154-question held-out test set) |
+  |---|---|
+  | TF-IDF + Logistic Regression | **96.8%** |
+  | Keyword-rule (Capstone 1 baseline) | 62.3% |
+
+- `agents/intent_classifier.py` now loads the pickled pipeline at import time and calls  
+  `_pipeline.predict([question])`. **Limitation:** the model only sees the raw question text,  
+  so a context-free follow-up like *"calculate it for last year?"* carries no signal that "it"  
+  refers to the prior turn's KPI — the model can't resolve that on its own. A small rule sits in  
+  front of it: if the question is short (≤6 words), the previous turn's intent was `doc_lookup`  
+  or `kpi_compute`, and it has a time qualifier or a recompute verb ("calculate", "what about",  
+  ...), route straight to `kpi_compute` — reusing the keyword lists from  
+  `agents/intent_classifier_keyword.py` — before ever calling the model.
+
+### Related Bugfixes — Three Nodes Were History-Blind
+
+Getting the same follow-up question — *"calculate it for last year?"* — to work end-to-end
+took three separate fixes, one per pipeline stage, because each stage independently evaluated
+the current question in isolation and had to be taught to fall back to `state["history"]`:
+
+1. **`agents/guardrail.py`** (runs first): originally rejected the question as `out_of_scope`  
+   because it has no domain keyword of its own. Fixed by letting non-off-topic questions  
+   through once `state["history"]` is non-empty — safe because `history` only gets a turn  
+   appended in `format_response`, which the graph never reaches for a blocked `out_of_scope`  
+   question, so a non-empty history is proof the conversation is already anchored in-domain.
+2. **`agents/intent_classifier.py`** (runs next): once the guardrail let it through, it was  
+   misrouted to `sql_query` instead of `kpi_compute` — see Objective 5's follow-up override.
+3. **`agents/retrieval_agent.py`** (runs after intent classification, before `kpi_agent`):  
+   once routed to `kpi_compute`, the ChromaDB query embedded only the raw follow-up text, so  
+   `kpi_agent`'s formula-extraction step found no relevant PDF chunk — there's no "AOV"/KPI  
+   name in *"calculate it for last year?"* for the embedding search to match on. Fixed by  
+   prepending the prior turn's question to the query text  
+   (`f"{history[-1]['question']} {question}"` when history is non-empty, unchanged on a first  
+   turn). `config/prompts.py: kpi_formula_extract_prompt()` was also updated to prefer a  
+   formula already stated earlier in the history over a fresh (weaker) documentation match.
 
 ### Updated Graph Entry Point
 
@@ -91,6 +162,71 @@ average latency by intent, and intent distribution. Read-only.
 Capstone 1:  guardrail → classify_intent → ...
 Capstone 2:  sanitize_input → guardrail → classify_intent → ...
 ```
+
+---
+
+## Visualisation
+
+Every tile, chart, and table in the system, across both the chat UI (`app.py`) and the
+monitoring dashboard (`dashboard/monitoring.py`, `dashboard/_charts.py`, `dashboard/_data.py`).
+All dashboard charts are Streamlit-native elements (`st.bar_chart` / `st.line_chart` / native
+`st.metric`) — no charting library beyond Streamlit itself, per the original scope rule
+(no Pygwalker).
+
+### Chat UI (`app.py`)
+
+| # | Name | Type | Where | Data shown |
+|---|---|---|---|---|
+| 1 | Intent chip + confidence badge + elapsed time | Badge row | Under every assistant message (`_render_meta`) | Classified intent, 0–5 eval score (colour-coded `badge-0`…`badge-5`), latency in seconds |
+| 2 | Query result table | Table (`st.dataframe`) | Under a `sql_query`/`kpi_compute` answer (`_render_dataframe`) | The raw result `DataFrame` returned by the SQL/KPI agent |
+| 3 | Query result chart | Bar chart (`st.bar_chart`) | Same component, second tab — only shown when the result has exactly 2 columns and the 2nd is numeric | First column as categories, second as values (e.g. revenue by nation) |
+| 4 | HITL feedback widget | Interactive control (`st.feedback("thumbs")`) | Under every assistant message (`_render_feedback`) | Not a data visualisation, but the input side of the feedback loop the dashboard's HITL chart (below) reports on |
+
+### Monitoring Dashboard (`dashboard/monitoring.py`)
+
+**15 KPI tiles** (`dashboard/_data.py: render_kpi_rows()`), 3 rows of 5, all `st.metric`:
+
+| Row | Tile | Metric shown |
+|---|---|---|
+| Traffic & Safety | Total Queries | Row count in the selected window |
+| Traffic & Safety | Blocked (score=0) | Count + % where `eval_score == 0` |
+| Traffic & Safety | Out-of-Scope | Count where `intent == "out_of_scope"` |
+| Traffic & Safety | Errors | Count where `error` is non-empty |
+| Traffic & Safety | Success Rate (≥3/5) | % of rows with `eval_score >= 3` |
+| Quality & Performance | Avg Confidence | Mean `eval_score`, out of 5 |
+| Quality & Performance | Avg Latency | Mean `elapsed_sec` |
+| Quality & Performance | P95 Latency | 95th-percentile `elapsed_sec` |
+| Quality & Performance | Most Active Role | Mode of `user_role` |
+| Quality & Performance | Top Intent | Mode of `intent` |
+| Model & Cost | Total Tokens | `total_input_tokens + total_output_tokens`, summed |
+| Model & Cost | Haiku Tokens | Generator-model tokens (all steps except `evaluator`) |
+| Model & Cost | Sonnet Tokens | Evaluator-model tokens (the `evaluator` step only) |
+| Model & Cost | Est. Haiku Cost | `haiku_tokens × Haiku 4.5 $/token` |
+| Model & Cost | Est. Total Cost | Est. Haiku cost + est. Sonnet cost |
+
+**10 charts** (`dashboard/_charts.py`), grouped under three `st.subheader`s:
+
+| # | Section | Name | Chart type | Colour | What it shows |
+|---|---|---|---|---|---|
+| 1 | Activity | Query Volume Over Time | Bar | Blue `#3B82F6` | Queries per hour |
+| 2 | Activity | Block Rate Over Time (%) | Line | Red `#EF4444` | Hourly % of queries with `eval_score == 0` |
+| 3 | Activity | Avg Confidence Score (Hourly) | Line | Green `#10B981` | Hourly mean `eval_score` |
+| 4 | Activity | Eval Score Distribution (0–5) | Bar | Indigo `#6366F1` | Histogram of `eval_score` values |
+| 5 | Distribution | Intent Distribution | Bar | Amber `#F59E0B` | Query count per intent |
+| 6 | Distribution | Query Volume by Role | Bar | Pink `#EC4899` | Query count per `user_role` |
+| 7 | Distribution | Avg Latency by Intent (s) | Bar | Orange `#F97316` | Mean `elapsed_sec` grouped by intent |
+| 8 | Distribution | HITL Feedback | Bar (3-colour) | `_FEEDBACK_COLORS` (validated triad) | Correct / Incorrect / No feedback counts |
+| 9 | Model & Cost | Token Usage by Model (Hourly) | Line (2 series) | Purple `#8B5CF6` (Haiku) + Teal `#14B8A6` (Sonnet) | Hourly token sums split by generator vs. evaluator model |
+| 10 | Model & Cost | Estimated Cost Over Time ($) | Line | Rose `#F43F5E` | Hourly estimated spend, Haiku + Sonnet combined |
+
+**4 tables** (`dashboard/monitoring.py: _render_query_explorer()` + the raw-data expander), all `st.dataframe`:
+
+| # | Name | Where | Contents |
+|---|---|---|---|
+| 1 | Recent Queries | Query Explorer, tab 1 | Last 50 queries (ts, question, role, intent, score, latency), keyword-searchable |
+| 2 | Slowest Queries | Query Explorer, tab 2 | Top 20 by `elapsed_sec` descending |
+| 3 | Blocked / Errors | Query Explorer, tab 3 | Rows with `eval_score == 0` or a non-empty `error` |
+| 4 | Raw audit data | Bottom-of-page expander | Every column, every row in the selected window — unfiltered escape hatch |
 
 ---
 
@@ -233,9 +369,16 @@ Capstone1_Implementation/
 │   ├── __init__.py
 │   ├── state.py                  ← AgentState TypedDict (shared state)
 │   ├── orchestrator.py           ← StateGraph wiring + routing logic
-│   ├── guardrail.py              ← Domain relevance check — blocks off-topic queries (no API call)
-│   ├── intent_classifier.py      ← Keyword-based intent detection (3 intents)
-│   ├── retrieval_agent.py        ← ChromaDB semantic search (module-level singleton)
+│   ├── guardrail.py              ← Domain relevance check — blocks off-topic queries (no API call);
+│   │                                 passes non-off-topic follow-ups through once history is non-empty
+│   ├── intent_classifier.py      ← Trained TF-IDF + LogisticRegression classifier (3 intents),
+│   │                                 with a history-aware rule override for context-free follow-ups
+│   ├── intent_classifier_keyword.py ← Original keyword-rule classifier — kept for the ML-vs-keyword
+│   │                                 accuracy comparison and reused by the follow-up override
+│   ├── retrieval_agent.py        ← ChromaDB semantic search (module-level singleton);
+│   │                                 prepends prior turn's question to the query when history
+│   │                                 is non-empty, so context-free follow-ups still retrieve
+│   │                                 the right PDF chunk
 │   ├── sql_agent.py              ← Haiku SQL generation + RBAC check
 │   ├── kpi_agent.py              ← Hybrid RAG+SQL: extract KPI formula → compute SQL
 │   ├── response_agent.py         ← Format final answer for UI
@@ -255,14 +398,35 @@ Capstone1_Implementation/
 │
 ├── utils/
 │   ├── __init__.py
-│   └── audit.py                  ← Delta audit logger: token tracking + per-query INSERT
+│   └── audit.py                  ← Delta audit logger: token tracking + per-query INSERT;
+│                                     + row_id/feedback columns, log_query() returns row_id,
+│                                     update_feedback() for the HITL thumbs feedback loop
+│
+├── .streamlit/
+│   └── config.toml               ← showSidebarNavigation = false (hides the default
+│                                     multipage nav in favour of our own st.page_link buttons)
+│
+├── dashboard/
+│   ├── __init__.py
+│   ├── monitoring.py             ← Audit dashboard: 6 charts, time-window selector,
+│   │                                 "⬅️ Back to Assistant" page_link; rendering only
+│   ├── _charts.py                ← Individual chart builders, incl. HITL feedback distribution
+│   └── _data.py                  ← Audit-table query/caching helpers
 │
 ├── data/
 │   ├── ingest.py                 ← One-time PDF → ChromaDB loader
+│   ├── generate_intent_dataset.py ← One-time: Claude Sonnet generates ~1000 labeled training
+│   │                                 questions + merges in real UAT questions
+│   ├── train_intent_classifier.py ← Fits + evaluates the TF-IDF+LogReg pipeline, saves the .pkl
+│   ├── intent_training_data.json ← ~1024 labeled (question, intent) training rows
+│   ├── intent_classifier.pkl     ← Fitted sklearn pipeline, loaded by intent_classifier.py
 │   ├── chroma_db/                ← Auto-created vector store
 │   └── docs/                     ← Place PDF files here
 │       ├── metrics_definitions.pdf
 │       └── data_dictionary.pdf
+│
+├── pages/
+│   └── 1_Monitoring_Dashboard.py ← Streamlit multipage entry — delegates to dashboard/monitoring.py
 │
 ├── evaluation/
 │   ├── __init__.py
@@ -906,15 +1070,21 @@ AgentState
 No API calls. Pure keyword matching. Runs as the **first node** in both graphs.
 
 ```
-Input : state["question"]
+Input : state["question"], state["history"]
 Output: state unchanged (relevant) OR state["intent"] = "out_of_scope" (blocked)
 
 Decision logic:
   1. Lowercase the question
-  2. Check for any DOMAIN_KEYWORDS (order, revenue, supplier, nation, trend, etc.)
-  3. Check for DOC_KEYWORDS (what is, how is, define, explain, etc.)
-  4. If EITHER matches → relevant, pass through to classify_intent
-  5. If NEITHER matches → out_of_scope, route to END immediately
+  2. Check OFF_TOPIC_MARKERS (weather, sports, movies, ...) → always blocks, even
+     if a domain word appears incidentally
+  3. Check for any DOMAIN_KEYWORDS (order, revenue, supplier, nation, trend, etc.)
+  4. Check for DOC_KEYWORDS (what is, how is, define, explain, etc.)
+  5. If EITHER matches → relevant, pass through to classify_intent
+  6. If history is non-empty (a prior turn already passed the guardrail this
+     session) → relevant, pass through — a short follow-up like "for last
+     year?" carries no domain keyword of its own but is still anchored to
+     the ongoing in-domain conversation
+  7. Otherwise → out_of_scope, route to END immediately
 
 Cost of a block : ~0ms, zero API calls, zero Databricks connections
 Cost of a miss  : ChromaDB returns no relevant chunks, LLM responds gracefully
@@ -922,39 +1092,54 @@ Cost of a miss  : ChromaDB returns no relevant chunks, LLM responds gracefully
 
 **Why definition questions (`what is X?`) get a pass:** even if `X` is not in the domain keyword list, a ChromaDB miss is cheap — the LLM just responds "no relevant documentation found." The false-positive cost is low, so we avoid incorrectly blocking legitimate definition questions.
 
+**Why history alone is enough to pass a question through (step 6):** `state["history"]` only
+gets a turn appended by `response_agent.py`'s `format_response` node, which the graph never
+reaches for a blocked `out_of_scope` question (the conditional edge routes straight to `END`
+from the guardrail). So a non-empty history is proof this session's conversation is already
+anchored in the TPC-H domain — an explicit topic pivot still gets caught by step 2's
+`OFF_TOPIC_MARKERS` check, which runs first.
+
 ---
 
-### `agents/intent_classifier.py` — Intent Detection
+### `agents/intent_classifier.py` — Intent Detection (Trained Model)
 
-No API calls. Pure keyword matching.
+**Stretch objective — replaced the keyword-rule classifier.** No live API call at inference
+time (the model is a pickled sklearn pipeline loaded once at import), but see the note below
+on the small rule-based override that still runs in front of it.
 
 ```mermaid
 flowchart TD
     Q["question.lower()"]
-    SQL_O{"SQL override<br/>keywords?"}
-    DOC{"doc<br/>keywords?"}
-    Default["→ sql_query"]
+    Short{"≤6 words AND prior turn was<br/>doc_lookup/kpi_compute AND<br/>(time qualifier OR recompute verb)?"}
+    Follow["→ kpi_compute<br/>(history-aware override)"]
+    Model["TF-IDF + LogisticRegression<br/>.predict([question])"]
 
-    Q --> SQL_O
-    SQL_O --> |Yes| SQL["→ sql_query"]
-    SQL_O --> |No| DOC
-    DOC --> |Yes| TQ{"time qualifier<br/>present?"}
-    TQ --> |Yes| KPI["→ kpi_compute"]
-    TQ --> |No| Doc["→ doc_lookup"]
-    DOC --> |No| Default
+    Q --> Short
+    Short --> |Yes| Follow
+    Short --> |No| Model
 ```
 
-**Keyword sets:**
+- **Model:** `TfidfVectorizer(ngram_range=(1,2)) + LogisticRegression(class_weight="balanced")`,
+  trained offline in `data/train_intent_classifier.py` on `data/intent_training_data.json`
+  (~1024 rows: ~330 Claude-Sonnet-generated examples per intent + the 38 real UAT questions),
+  saved to `data/intent_classifier.pkl`.
+- **Measured accuracy** on a 154-question held-out test set: **96.8%**, vs. **62.3%** for the
+  old keyword classifier run over the same set (now preserved as
+  `agents/intent_classifier_keyword.py`).
+- **Why the override still exists:** the model only ever sees the raw question text — it has
+  no access to `state["history"]`, so a context-free follow-up like *"calculate it for last
+  year?"* gives it nothing to key off. The override reuses `FOLLOWUP_COMPUTE_KEYWORDS` and
+  `TIME_QUALIFIERS` from `agents/intent_classifier_keyword.py` (single source of truth, not
+  duplicated) and only fires for short questions (≤6 words) immediately following a
+  `doc_lookup` or `kpi_compute` turn — anything else goes to the model.
+- **Why `kpi_compute` and not `sql_query` for the override:** `kpi_agent.py` grounds its SQL
+  in the documented KPI formula extracted via RAG first; `sql_agent.py` writes ad-hoc SQL with
+  no such grounding. Routing an ungrounded follow-up to `sql_query` risks a plausible-looking
+  number that doesn't match the KPI's actual definition.
 
-| Intent | Keywords |
-|---|---|
-| `sql_query` (override) | total, count, sum, how many, show me, list, per, top, rank, group, aggregate, compare, trend, monthly, quarterly, yearly, over time, by nation, by region, by segment, by year, by month |
-| `kpi_compute` | doc keyword (what is / what was / define) **AND** time qualifier: for q1, for q2, for q3, for q4, in 199, in 200, last quarter, last year, last month, for year, for month, between, from |
-| `doc_lookup` | what is, define, definition, how is, what does, explain, meaning of, describe (with no time qualifier) |
-
-> **Priority order:** sql_query (override) → kpi_compute (doc + time) → doc_lookup → sql_query (default). A question with "what is" and no time qualifier goes to `doc_lookup`. The same question with "for Q1 1995" goes to `kpi_compute`, triggering the hybrid RAG+SQL path.
-
-> **Note:** `"calculate"` and `"compute"` were intentionally removed from `SQL_OVERRIDE_KEYWORDS`. They appeared as substrings in definition questions ("how is X **calculated**?"), causing them to be misclassified as `sql_query` and triggering RBAC violations when the metric needed `lineitem`. Time qualifiers and other sql_override keywords are sufficient to route computation requests correctly.
+> **Retraining:** `python data/generate_intent_dataset.py` (regenerates the training set via
+> Claude Sonnet) then `python data/train_intent_classifier.py` (retrains, prints the accuracy
+> report and the ML-vs-keyword comparison, overwrites `intent_classifier.pkl`).
 
 ---
 
@@ -993,13 +1178,14 @@ flowchart TD
 
 Every query is logged to a Databricks Delta table (`data_assistant.audit.query_audit_log`) automatically after the graph completes.
 
-**Three functions:**
+**Functions:**
 
 | Function | Purpose |
 |---|---|
 | `add_tokens(current, step, usage)` | Merges one LLM call's `response.usage` into the running `token_usage` dict in state |
-| `_ensure_table()` | Runs `CREATE CATALOG / SCHEMA / TABLE IF NOT EXISTS` on first call (idempotent) |
-| `log_query(question, user_role, result)` | Inserts one row into the Delta table. Catches all exceptions and prints a warning — never crashes the UI |
+| `_ensure_table()` | Runs `CREATE CATALOG / SCHEMA / TABLE IF NOT EXISTS` on first call (idempotent); also `ALTER TABLE ADD COLUMN` for any columns added after the table already existed |
+| `log_query(question, user_role, result) -> str \| None` | Inserts one row into the Delta table, generating a `uuid4().hex` `row_id` for it. Catches all exceptions and prints a warning — never crashes the UI. Returns the `row_id` (or `None` on failure) so the caller can attach feedback to this exact row later |
+| `update_feedback(row_id, feedback)` | HITL hook — `UPDATE ... SET feedback = ? WHERE row_id = ?`. Logged only for now; not wired into any auto-retry/self-correction path |
 
 **Delta table schema (`data_assistant.audit.query_audit_log`):**
 
@@ -1018,6 +1204,10 @@ Every query is logged to a Databricks Delta table (`data_assistant.audit.query_a
 | `total_input_tokens` | INT | Sum of input tokens across all LLM calls |
 | `total_output_tokens` | INT | Sum of output tokens across all LLM calls |
 | `token_calls` | STRING | JSON array of per-step token breakdown |
+| `generator_model` | STRING | `APP_MODEL` (Haiku) — the generation model for this turn |
+| `evaluator_model` | STRING | `APP_MODEL_EVAL` (Sonnet) — the judge model for this turn |
+| `row_id` | STRING | `uuid4().hex`, generated per insert — lets HITL feedback target this exact row |
+| `feedback` | STRING | `"correct"` / `"incorrect"` / `NULL` — set via `update_feedback()` from the UI's thumbs widget |
 
 **Token tracking — which steps contribute:**
 

@@ -16,6 +16,7 @@ from dashboard._charts import (
     chart_intent_distribution, chart_latency_by_intent,
     chart_score_distribution, chart_role_activity,
     chart_model_token_split, chart_cost_over_time,
+    chart_feedback_distribution,
 )
 
 st.set_page_config(page_title="Audit Monitor", page_icon="📊", layout="wide")
@@ -56,6 +57,8 @@ def main() -> None:
     st.caption("Live view of query_audit_log · IST (UTC+5:30) · read-only · cache refreshes every 60 s")
 
     with st.sidebar:
+        st.page_link("app.py", label="⬅️ Back to Assistant", use_container_width=True)
+        st.markdown("---")
         st.header("Controls")
         window_label = st.selectbox("Time window", list(WINDOWS.keys()), index=0)
         st.markdown("---")
@@ -91,6 +94,7 @@ def main() -> None:
 
     c7, c8 = st.columns(2)
     with c7: chart_latency_by_intent(df_t)
+    with c8: chart_feedback_distribution(df_t)
 
     # ── Model & Cost charts ────────────────────────────────────────────────────
     st.subheader("Model & Cost")

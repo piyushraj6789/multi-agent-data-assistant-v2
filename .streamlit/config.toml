@@ -1,0 +1,7 @@
+[client]
+# Navigation between app.py and dashboard/monitoring.py is handled by our own
+# st.page_link buttons ("Open Monitoring Dashboard" / "Back to Assistant").
+# The default auto-generated nav list is redundant with those and was being
+# hidden with a CSS selector that doesn't reliably match the current DOM —
+# this is the actual supported way to turn it off.
+showSidebarNavigation = false

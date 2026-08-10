@@ -1,6 +1,7 @@
 """Audit logger — writes one record per query to a Databricks Delta table."""
 
 import json
+import uuid
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -51,11 +52,16 @@ def _ensure_table() -> None:
                     total_output_tokens INT,
                     token_calls         STRING,
                     generator_model     STRING,
-                    evaluator_model     STRING
+                    evaluator_model     STRING,
+                    row_id              STRING,
+                    feedback            STRING
                 )
             """)
             # Add columns to existing tables that predate this schema version
-            for col, typ in [("generator_model", "STRING"), ("evaluator_model", "STRING")]:
+            for col, typ in [
+                ("generator_model", "STRING"), ("evaluator_model", "STRING"),
+                ("row_id", "STRING"), ("feedback", "STRING"),
+            ]:
                 try:
                     cursor.execute(f"ALTER TABLE {AUDIT_TABLE} ADD COLUMN {col} {typ}")
                 except Exception:
@@ -65,8 +71,13 @@ def _ensure_table() -> None:
     _table_ensured = True
 
 
-def log_query(question: str, user_role: str, result: dict) -> None:
-    """Insert one audit record into the Delta table. Fails silently to never block the UI."""
+def log_query(question: str, user_role: str, result: dict) -> str | None:
+    """Insert one audit record into the Delta table. Fails silently to never block the UI.
+
+    Returns the generated row_id (None on failure) so the caller can attach
+    HITL feedback to this exact row later via update_feedback().
+    """
+    row_id = uuid.uuid4().hex
     try:
         _ensure_table()
         tu  = result.get("token_usage") or {}
@@ -77,7 +88,7 @@ def log_query(question: str, user_role: str, result: dict) -> None:
             with conn.cursor() as cursor:
                 cursor.execute(
                     f"INSERT INTO {AUDIT_TABLE} VALUES "
-                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         ts,
                         question,
@@ -94,9 +105,34 @@ def log_query(question: str, user_role: str, result: dict) -> None:
                         json.dumps(tu.get("calls", [])),
                         APP_MODEL,
                         APP_MODEL_EVAL,
+                        row_id,
+                        None,
                     ],
                 )
         finally:
             conn.close()
+        return row_id
     except Exception as e:
         print(f"[audit] Warning: could not log query to Databricks: {e}")
+        return None
+
+
+def update_feedback(row_id: str, feedback: str) -> None:
+    """HITL hook: record a user's correct/incorrect judgement against its audit row.
+
+    Logged only for now — see data/train_intent_classifier.py for how flagged
+    intent misclassifications get turned into corrective training examples.
+    """
+    try:
+        _ensure_table()
+        conn = get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    f"UPDATE {AUDIT_TABLE} SET feedback = ? WHERE row_id = ?",
+                    [feedback, row_id],
+                )
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"[audit] Warning: could not record feedback to Databricks: {e}")

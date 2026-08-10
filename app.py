@@ -9,7 +9,7 @@ from agents.orchestrator import agent_graph_base
 from agents.response_agent import stream_answer
 from agents.evaluator import evaluate_result
 from config.rbac import get_allowed_tables, ROLE_CONFIG
-from utils.audit import log_query
+from utils.audit import log_query, update_feedback
 
 st.set_page_config(
     page_title="Multi-Agent Data Assistant with Guardrails & Observability",
@@ -214,7 +214,7 @@ def _render_sidebar() -> None:
         )
 
     st.sidebar.markdown("---")
-    st.sidebar.link_button("📊 Open Monitoring Dashboard", "http://localhost:8503", use_container_width=True)
+    st.sidebar.page_link("pages/1_Monitoring_Dashboard.py", label="📊 Open Monitoring Dashboard", use_container_width=True)
     if st.sidebar.button("🗑️  Clear chat", use_container_width=True):
         st.session_state.messages = []
         st.session_state.history = []   # Objective 1: clear also resets history
@@ -283,6 +283,25 @@ def _render_meta(result: dict) -> None:
         st.caption(f"⚠ {n}")
 
 
+def _render_feedback(idx: int, msg: dict) -> None:
+    """HITL: thumbs up/down under each answer, logged against its audit row.
+
+    Feedback is only logged for now (not used to auto-retry or self-correct) —
+    it feeds the same kind of manual "add to training data + retrain" loop
+    used for the intent classifier. See utils/audit.py: update_feedback().
+    """
+    row_id = msg.get("row_id")
+    if not row_id or not msg.get("content"):
+        return
+
+    fb = st.feedback("thumbs", key=f"feedback_{idx}")
+    if fb is not None and msg.get("feedback_raw") != fb:
+        msgs = list(st.session_state.messages)
+        msgs[idx] = {**msgs[idx], "feedback_raw": fb}
+        st.session_state.messages = msgs
+        update_feedback(row_id, "correct" if fb == 1 else "incorrect")
+
+
 def _render_dataframe(df: pd.DataFrame) -> None:
     """Show table and chart as switchable tabs; table-only if chart not applicable."""
     can_chart = len(df.columns) == 2 and pd.api.types.is_numeric_dtype(df.iloc[:, 1])
@@ -308,7 +327,7 @@ def _render_dataframe(df: pd.DataFrame) -> None:
 
 def _render_chat_history() -> None:
     """Replay all past messages from session state."""
-    for msg in st.session_state.messages:
+    for idx, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
             if msg.get("error"):
                 st.error(msg["error"])
@@ -322,6 +341,8 @@ def _render_chat_history() -> None:
             elif msg["role"] == "assistant":
                 st.caption("_(response unavailable)_")
             _render_meta(msg)
+            if msg["role"] == "assistant":
+                _render_feedback(idx, msg)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -456,12 +477,19 @@ def main() -> None:
                 st.session_state.history = prior[-APP_HISTORY_TURNS:]
 
             final_msg = msgs[placeholder_idx]
-            _render_meta(final_msg)
-            log_query(question, role, {
+            row_id = log_query(question, role, {
                 **final_msg,
                 "answer":      final_msg.get("content", ""),
                 "token_usage": final_state.get("token_usage", {}),
             })
+            if row_id:
+                msgs = list(st.session_state.messages)
+                msgs[placeholder_idx] = {**final_msg, "row_id": row_id}
+                st.session_state.messages = msgs
+                final_msg = msgs[placeholder_idx]
+
+            _render_meta(final_msg)
+            _render_feedback(placeholder_idx, final_msg)
 
 
 if __name__ == "__main__":
