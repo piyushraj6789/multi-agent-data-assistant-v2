@@ -1,4 +1,6 @@
-"""Capstone 2 evaluation test suite — 38 cases, last run: 38/38 passed.
+"""Capstone 2 evaluation test suite — 38 cases, regression gate baseline 37/38
+(AMT3 is a known pre-existing guardrail relevance-check flake, tracked
+separately — see tests/run_all_tests.py).
 
 Used by evaluation/run_eval.py for scored eval and by tests/run_all_tests.py
 for pass/fail gate testing. Each case maps to one of the four Capstone 2

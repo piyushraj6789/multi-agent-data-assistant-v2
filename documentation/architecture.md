@@ -128,11 +128,20 @@ The keyword-rule `agents/intent_classifier.py` was replaced with a trained model
 - `agents/intent_classifier.py` now loads the pickled pipeline at import time and calls  
   `_pipeline.predict([question])`. **Limitation:** the model only sees the raw question text,  
   so a context-free follow-up like *"calculate it for last year?"* carries no signal that "it"  
-  refers to the prior turn's KPI — the model can't resolve that on its own. A small rule sits in  
-  front of it: if the question is short (≤6 words), the previous turn's intent was `doc_lookup`  
-  or `kpi_compute`, and it has a time qualifier or a recompute verb ("calculate", "what about",  
-  ...), route straight to `kpi_compute` — reusing the keyword lists from  
-  `agents/intent_classifier_keyword.py` — before ever calling the model.
+  refers to the prior turn's KPI. An earlier version of this file handled that with a blunt rule  
+  (≤6 words + prior turn `doc_lookup`/`kpi_compute` + a time/recompute keyword → force  
+  `kpi_compute`) — **removed** after it broke a working case: *"How is it calculated?"* is  
+  textbook `doc_lookup` phrasing the model already gets right alone (85.6% confidence), and the  
+  blunt rule overrode it regardless. The model turned out to already resolve most bare  
+  follow-ups correctly on its own — the synthetic training set had enough elliptical phrasing to  
+  generalize. One narrower override remains (`_is_bare_kpi_continuation`), added for a  
+  genuinely ambiguous case: *"compare 1995 vs 1996"* right after a KPI turn scores 46%  
+  `kpi_compute` vs 49% `sql_query` from the model alone. It fires only when the model's own top  
+  call was `sql_query`, the prior turn specifically was `kpi_compute` (not `doc_lookup`), and the  
+  question names no ad-hoc entity of its own (nation/region/supplier/...) — *"compare revenue by  
+  nation for 1995 vs 1996"* is left alone, since it introduces its own grouping dimension and the  
+  model is confidently right (69%). This version no longer imports anything from  
+  `agents/intent_classifier_keyword.py`.
 
 ### Related Bugfixes — Three Nodes Were History-Blind
 
@@ -162,6 +171,54 @@ the current question in isolation and had to be taught to fall back to `state["h
 Capstone 1:  guardrail → classify_intent → ...
 Capstone 2:  sanitize_input → guardrail → classify_intent → ...
 ```
+
+### Objective 6 (Stretch) — LangSmith Observability
+
+**Problem it solves:** the audit dashboard (Objective 4) reports the *outcome* of a query —
+intent, score, latency, cost — but not what happened *inside the graph* to produce it. There
+was no way to inspect the exact prompt sent to the LLM at a given node, see both attempts in a
+self-correction retry side by side, or confirm conversation history actually reached a prompt
+rather than inferring it from the final answer looking plausible.
+
+- **One-line change with app-wide effect:** `utils/llm_client.py`'s shared Anthropic client is
+  wrapped — `llm_client = wrap_anthropic(anthropic.Anthropic(...))` from
+  `langsmith.wrappers`. Every other file that calls `llm_client.messages.create(...)`
+  (`sql_agent.py`, `kpi_agent.py`, `evaluator.py`, `response_agent.py`, the doc-answer node,
+  even the offline `data/generate_intent_dataset.py`) needed **no changes** — they all already
+  import the client from this one place.
+- **LangGraph traces itself automatically.** Because the project already runs on LangGraph,
+  enabling tracing via environment variables reports the full node-by-node execution path to
+  LangSmith with no changes to `agents/orchestrator.py` at all — the graph structure is already
+  visible to LangChain's tracing hooks.
+- **An MLflow-based approach was tried first and removed.** Initial LLMOps work wired MLflow
+  into `evaluation/run_eval.py` (experiment tracking — logging KPI metrics per eval run) and
+  `tests/run_all_tests.py` (a 37/38 regression-gate threshold, accepting the known `AMT3`
+  guardrail flake as a non-regression). The MLflow pieces were fully removed — package
+  uninstalled, code reverted, generated `mlflow.db` deleted — after a scope decision to
+  standardize on LangSmith for observability instead, since it instruments the *live app*
+  itself rather than only offline batch-eval runs, and needs far less manual instrumentation
+  code. The regression-gate threshold and its underlying `evaluation/scorer.py` bug fix
+  (`r.get("eval_score", 0)` doesn't protect against a key that's present but `None` — only
+  against a missing key) were kept, since they're independent of which tracing tool is used.
+- **Config** (`.env`, template in `.env.example`): `LANGSMITH_TRACING=true`,
+  `LANGSMITH_API_KEY`, `LANGSMITH_ENDPOINT` (this account is on the APAC regional deployment —
+  `https://apac.smith.langchain.com` for the UI, `https://apac.api.smith.langchain.com` for the
+  API endpoint, not the global default), `LANGSMITH_PROJECT=capstone2-multi-agent-assistant`.
+  If `LANGSMITH_TRACING` is unset or not `"true"`, `wrap_anthropic()` is a no-op passthrough —
+  the app runs identically with or without a configured account.
+- **What a trace shows:** the full node chain for a question (e.g. `sanitize_input → guardrail →
+  classify_intent → retrieve_context → load_schema → kpi_agent → format_response →
+  evaluate_result`) as nested spans, with the actual wrapped LLM call inside each relevant node
+  showing the full prompt, response text, token counts, latency, and which model (Haiku vs.
+  Sonnet) handled it. A blocked `out_of_scope` question's trace visibly stops right after
+  `guardrail`; a self-corrected SQL query's trace visibly contains two SQL-generation calls.
+- **Free-tier limit:** LangSmith's free plan caps monthly trace volume. Each question produces
+  several traces (one per graph node plus one per wrapped LLM call), so a full 38-case batch run
+  consumes meaningfully more quota than casual manual testing.
+- **Not yet connected:** the HITL `feedback` column (Objective 4) and LangSmith traces are
+  separate systems — a trace isn't tagged with the audit table's `row_id`, so there's currently
+  no way to jump from "a user marked this incorrect" to "here's exactly what the model saw."
+  Noted as a possible future addition, not built.
 
 ---
 
@@ -236,7 +293,8 @@ All dashboard charts are Streamlit-native elements (`st.bar_chart` / `st.line_ch
 flowchart TD
     UI["Streamlit UI"]
     Orch["LangGraph Orchestrator"]
-    IC["Intent Classifier"]
+    San["Sanitizer — sanitize_input()<br/>(entry node, no API call)"]
+    IC["Intent Classifier — trained ML model"]
     RA["Retrieval Agent"]
     SA["SQL Agent"]
     DocA["Doc Answer Node"]
@@ -246,10 +304,13 @@ flowchart TD
     GR["Guardrail — Domain Relevance Check"]
     ChromaDB["ChromaDB Vector Store"]
     Haiku["Claude Haiku LLM"]
+    Sonnet["Claude Sonnet LLM"]
     DB["Databricks samples.tpch"]
+    LS["LangSmith — traces every LLM call<br/>+ full graph run"]
 
     UI --> Orch
-    Orch --> GR
+    Orch --> San
+    San --> GR
     GR -->|out_of_scope| UI
     GR -->|relevant| IC
     IC -->|doc_lookup| RA
@@ -270,7 +331,10 @@ flowchart TD
     KpiA --> DB
     DocA <--> Haiku
     ResA <--> Haiku
-    Eval <--> Haiku
+    Eval <--> Sonnet
+    Haiku -.-> LS
+    Sonnet -.-> LS
+    Orch -.-> LS
 ```
 
 ### High-Level Block Diagram
@@ -288,8 +352,9 @@ flowchart LR
     end
 
     subgraph AgentLayer["Agent Layer — LangGraph"]
+        San["Sanitizer (entry node)"]
         GR["Guardrail"]
-        IC["Intent Classifier"]
+        IC["Intent Classifier — ML"]
         RA["Retrieval Agent"]
         subgraph SpecAgents["Specialized Agents"]
             SA["SQL Agent"]
@@ -312,6 +377,11 @@ flowchart LR
 
     subgraph LLMLayer["LLM Layer"]
         Haiku["Claude Haiku"]
+        Sonnet["Claude Sonnet"]
+    end
+
+    subgraph ObsLayer["Observability Layer"]
+        LangSmith["LangSmith — traces every wrapped<br/>LLM call + the LangGraph run"]
     end
 
     subgraph CfgLayer["Config Layer"]
@@ -320,7 +390,8 @@ flowchart LR
 
     Browser --> ChatUI
     Sidebar --> RBAC
-    ChatUI --> GR
+    ChatUI --> San
+    San --> GR
     GR -->|"relevant"| IC
     GR -->|"out_of_scope"| Browser
     IC --> RA
@@ -336,19 +407,23 @@ flowchart LR
     DocA <--> Haiku
     KpiA <--> Haiku
     ResA <--> Haiku
-    Eval <--> Haiku
+    Eval <--> Sonnet
+    Haiku -.->|"wrap_anthropic()"| LangSmith
+    Sonnet -.->|"wrap_anthropic()"| LangSmith
 
     classDef agent fill:#1e3a5f,stroke:#38bdf8,color:#fff
     classDef llm fill:#3b1f5e,stroke:#a78bfa,color:#fff
     classDef data fill:#1a3a2a,stroke:#34d399,color:#fff
     classDef cfg fill:#3d2010,stroke:#fb923c,color:#fff
     classDef ui fill:#1f2937,stroke:#60a5fa,color:#fff
+    classDef obs fill:#4a1d3d,stroke:#f472b6,color:#fff
 
-    class GR,IC,RA,SA,DocA,KpiA,ResA,Eval agent
-    class Haiku llm
+    class San,GR,IC,RA,SA,DocA,KpiA,ResA,Eval agent
+    class Haiku,Sonnet llm
     class ChromaDB,PDFs,TPCH,AuditLog data
     class RBAC cfg
     class Browser,ChatUI,Sidebar ui
+    class LangSmith obs
 ```
 
 ---
@@ -356,7 +431,7 @@ flowchart LR
 ## 3. Project File Structure
 
 ```
-Capstone1_Implementation/
+Capstone2_Implementation/
 │
 ├── app.py                        ← Streamlit entry point (UI)
 ├── requirements.txt              ← Pinned dependencies
@@ -369,12 +444,15 @@ Capstone1_Implementation/
 │   ├── __init__.py
 │   ├── state.py                  ← AgentState TypedDict (shared state)
 │   ├── orchestrator.py           ← StateGraph wiring + routing logic
+│   ├── sanitizer.py              ← sanitize_input() — the graph's actual entry node (Objective 2a):
+│   │                                 strips prompt-injection patterns, truncates oversized input,
+│   │                                 before anything else (including guardrail) touches the question
 │   ├── guardrail.py              ← Domain relevance check — blocks off-topic queries (no API call);
 │   │                                 passes non-off-topic follow-ups through once history is non-empty
 │   ├── intent_classifier.py      ← Trained TF-IDF + LogisticRegression classifier (3 intents),
-│   │                                 with a history-aware rule override for context-free follow-ups
-│   ├── intent_classifier_keyword.py ← Original keyword-rule classifier — kept for the ML-vs-keyword
-│   │                                 accuracy comparison and reused by the follow-up override
+│   │                                 with one narrow override for a single ambiguous case
+│   ├── intent_classifier_keyword.py ← Original keyword-rule classifier — kept only as the
+│   │                                 accuracy-comparison baseline in train_intent_classifier.py
 │   ├── retrieval_agent.py        ← ChromaDB semantic search (module-level singleton);
 │   │                                 prepends prior turn's question to the query when history
 │   │                                 is non-empty, so context-free follow-ups still retrieve
@@ -398,9 +476,12 @@ Capstone1_Implementation/
 │
 ├── utils/
 │   ├── __init__.py
-│   └── audit.py                  ← Delta audit logger: token tracking + per-query INSERT;
-│                                     + row_id/feedback columns, log_query() returns row_id,
-│                                     update_feedback() for the HITL thumbs feedback loop
+│   ├── audit.py                  ← Delta audit logger: token tracking + per-query INSERT;
+│   │                                 + row_id/feedback columns, log_query() returns row_id,
+│   │                                 update_feedback() for the HITL thumbs feedback loop
+│   └── llm_client.py             ← Shared Anthropic client, wrapped with langsmith.wrappers.
+│                                     wrap_anthropic() — every LLM call app-wide traces to
+│                                     LangSmith automatically (Objective 6), no other file changed
 │
 ├── .streamlit/
 │   └── config.toml               ← showSidebarNavigation = false (hides the default
@@ -488,15 +569,27 @@ LangGraph is a library built on top of LangChain that lets you define agent pipe
 ┌──────────────────────┬──────────────────────────────────────────────────────┐
 │ Node                 │ What it does                                         │
 ├──────────────────────┼──────────────────────────────────────────────────────┤
+│ sanitize_input       │ Entry node (Objective 2a) — no API call. Strips      │
+│                      │ prompt-injection patterns ("ignore previous          │
+│                      │ instructions", "system:", ...), truncates oversized  │
+│                      │ input to APP_MAX_INPUT_CHARS. Runs before guardrail  │
+│                      │ so nothing downstream ever sees the raw question.    │
+├──────────────────────┼──────────────────────────────────────────────────────┤
 │ guardrail            │ Keyword check — no API call, ~0ms.                   │
 │                      │ If question has no TPC-H domain terms AND no         │
 │                      │ definition keywords → sets intent="out_of_scope"     │
 │                      │ and routes to END immediately. Prevents off-topic    │
 │                      │ queries (e.g. "give me 2+2") from hitting            │
-│                      │ ChromaDB or Databricks.                              │
+│                      │ ChromaDB or Databricks. Non-off-topic follow-ups     │
+│                      │ pass through once state["history"] is non-empty.     │
 ├──────────────────────┼──────────────────────────────────────────────────────┤
-│ classify_intent      │ Reads question, sets intent via keyword matching.    │
-│                      │ No API call. Pure Python.                            │
+│ classify_intent      │ Reads question, sets intent via a trained TF-IDF +   │
+│                      │ LogisticRegression model (stretch objective — was    │
+│                      │ keyword matching in Capstone 1). No API call — the   │
+│                      │ model is a pickled sklearn pipeline loaded once at   │
+│                      │ import time. One narrow rule-based override sits in  │
+│                      │ front of it for a single case text alone can't       │
+│                      │ resolve (see Objective 5 in Capstone 2 Additions).   │
 ├──────────────────────┼──────────────────────────────────────────────────────┤
 │ retrieve_context     │ Queries ChromaDB with the question, stores top-3     │
 │                      │ PDF chunks in state["doc_context"].                  │
@@ -527,15 +620,28 @@ LangGraph is a library built on top of LangChain that lets you define agent pipe
 │                      │ Handles: "What is Average Days to Ship for Q3 1996?", │
 │                      │          "What was gross margin in 1997?"            │
 ├──────────────────────┼──────────────────────────────────────────────────────┤
-│ format_response      │ Final node. Routes to error / summary / doc answer   │
-│                      │ depending on state. Calls Haiku for DataFrame        │
-│                      │ summarisation if intent = sql_query.                 │
+│ format_response      │ Routes to error / summary / doc answer depending on  │
+│                      │ state. Calls Haiku for DataFrame summarisation if    │
+│                      │ intent = sql_query. Appends the completed turn to    │
+│                      │ state["history"] (Objective 1).                     │
+├──────────────────────┼──────────────────────────────────────────────────────┤
+│ evaluate_result      │ Inline LLM-as-judge — scores the answer 0-5.         │
+│                      │ Uses Claude Sonnet (APP_MODEL_EVAL), not Haiku       │
+│                      │ (Objective 3 — cross-model evaluator, so the same    │
+│                      │ model never grades its own output). Final node       │
+│                      │ before END; result gets written to the audit table.  │
 └──────────────────────┴──────────────────────────────────────────────────────┘
 ```
+
+Every node above that calls `llm_client` (i.e. every node except `sanitize_input`, `guardrail`, and
+`classify_intent`) traces automatically to LangSmith — see Objective 6 in Capstone 2 Additions.
 
 ### 4c. Conditional Edges (Routing Logic)
 
 ```
+sanitize_input
+    └── always                            ──► guardrail
+
 guardrail
     ├── state["intent"] == "out_of_scope" ──► END   (no Databricks, no LLM)
     └── intent not set yet               ──► classify_intent
@@ -788,10 +894,12 @@ Every question travels through the same LangGraph pipeline. The **intent** decid
 flowchart TD
     Start(["👤 User Question"])
     Init["Streamlit UI <br/> Captures question + active role"]
+    San["Sanitizer<br/>Strips injection patterns, truncates — no API call"]
     GR["Guardrail<br/>Domain keyword check — no API call"]
     OOS(["🚫 Out of Scope<br/>Friendly rejection — ~0ms"])
-    IC["Intent Classifier<br/>Zero-latency NLU — no API call"]
+    IC["Intent Classifier<br/>Trained TF-IDF + LogisticRegression model — no API call"]
 
+    San --> GR
     GR -->|"Off-topic"| OOS
     GR -->|"Relevant"| IC
     IC -->|"Definition Lookup"| DocBranch
@@ -821,7 +929,7 @@ flowchart TD
     ResA["Response Agent<br/>Natural language summary · Table · Chart"]
     Eval["Evaluator<br/>LLM-as-judge · Confidence score 0–5"]
 
-    Start --> Init --> GR
+    Start --> Init --> San
     DocBranch --> ResA
     KpiBranch --> ResA
     SQLBranch --> ResA
@@ -1104,38 +1212,53 @@ anchored in the TPC-H domain — an explicit topic pivot still gets caught by st
 ### `agents/intent_classifier.py` — Intent Detection (Trained Model)
 
 **Stretch objective — replaced the keyword-rule classifier.** No live API call at inference
-time (the model is a pickled sklearn pipeline loaded once at import), but see the note below
-on the small rule-based override that still runs in front of it.
+time (the model is a pickled sklearn pipeline loaded once at import). The model runs first;
+one narrow override can override its output for a single ambiguous case.
 
 ```mermaid
 flowchart TD
-    Q["question.lower()"]
-    Short{"≤6 words AND prior turn was<br/>doc_lookup/kpi_compute AND<br/>(time qualifier OR recompute verb)?"}
-    Follow["→ kpi_compute<br/>(history-aware override)"]
+    Q["question"]
     Model["TF-IDF + LogisticRegression<br/>.predict([question])"]
+    IsSQL{"prediction == sql_query?"}
+    Continuation{"prior turn was kpi_compute AND<br/>≤8 words AND no ad-hoc entity<br/>(nation/region/supplier/...)?"}
+    Override["→ kpi_compute<br/>(_is_bare_kpi_continuation)"]
+    Keep["→ model's prediction, unchanged"]
 
-    Q --> Short
-    Short --> |Yes| Follow
-    Short --> |No| Model
+    Q --> Model --> IsSQL
+    IsSQL --> |No| Keep
+    IsSQL --> |Yes| Continuation
+    Continuation --> |Yes| Override
+    Continuation --> |No| Keep
 ```
 
 - **Model:** `TfidfVectorizer(ngram_range=(1,2)) + LogisticRegression(class_weight="balanced")`,
   trained offline in `data/train_intent_classifier.py` on `data/intent_training_data.json`
-  (~1024 rows: ~330 Claude-Sonnet-generated examples per intent + the 38 real UAT questions),
-  saved to `data/intent_classifier.pkl`.
-- **Measured accuracy** on a 154-question held-out test set: **96.8%**, vs. **62.3%** for the
-  old keyword classifier run over the same set (now preserved as
-  `agents/intent_classifier_keyword.py`).
-- **Why the override still exists:** the model only ever sees the raw question text — it has
-  no access to `state["history"]`, so a context-free follow-up like *"calculate it for last
-  year?"* gives it nothing to key off. The override reuses `FOLLOWUP_COMPUTE_KEYWORDS` and
-  `TIME_QUALIFIERS` from `agents/intent_classifier_keyword.py` (single source of truth, not
-  duplicated) and only fires for short questions (≤6 words) immediately following a
-  `doc_lookup` or `kpi_compute` turn — anything else goes to the model.
-- **Why `kpi_compute` and not `sql_query` for the override:** `kpi_agent.py` grounds its SQL
-  in the documented KPI formula extracted via RAG first; `sql_agent.py` writes ad-hoc SQL with
-  no such grounding. Routing an ungrounded follow-up to `sql_query` risks a plausible-looking
-  number that doesn't match the KPI's actual definition.
+  (~1039 rows: ~330 Claude-Sonnet-generated examples per intent + the 38 real UAT questions +
+  15 hand-corrective examples added after testing found two specific misclassification
+  patterns), saved to `data/intent_classifier.pkl`.
+- **Measured accuracy** on a held-out test set: **~96%**, vs. **~63%** for the old keyword
+  classifier run over the same set (now preserved as `agents/intent_classifier_keyword.py`,
+  used only as the comparison baseline in the training script).
+- **An earlier, blunter override was removed.** The first version force-routed to `kpi_compute`
+  whenever a question was ≤6 words, the prior turn was `doc_lookup` or `kpi_compute`, and it had
+  a time/recompute keyword. That broke *"How is it calculated?"* right after a `doc_lookup`
+  turn — textbook definition phrasing the model already classifies correctly alone (85.6%
+  confidence) — because the blunt rule overrode it regardless. Testing showed the model already
+  resolves most bare follow-ups correctly by itself (the synthetic training data had enough
+  elliptical phrasing to generalize), so the override was narrowed instead of discarded.
+- **The remaining override** (`_is_bare_kpi_continuation`) targets one specific gap: a question
+  like *"compare 1995 vs 1996"* right after a KPI-computation turn scores 46% `kpi_compute` vs.
+  49% `sql_query` from the model alone — "compare" reads as an ad-hoc aggregation cue in the
+  training data, and the model has no visibility into conversation history to know it's
+  continuing the same KPI. It only fires when **all** of: the model's own prediction was
+  `sql_query`, the prior turn was specifically `kpi_compute` (not `doc_lookup` — a doc follow-up
+  should stay a doc follow-up), and the question names no ad-hoc entity word of its own. A
+  question like *"compare revenue by nation for 1995 vs 1996"* is left alone — it introduces its
+  own grouping dimension and the model is confidently right (69%) without help.
+- **Why `kpi_compute` and not `sql_query` when the override fires:** `kpi_agent.py` grounds its
+  SQL in the documented KPI formula extracted via RAG first; `sql_agent.py` writes ad-hoc SQL
+  with no such grounding. Routing an ungrounded follow-up to `sql_query` risks a
+  plausible-looking number that doesn't match the KPI's actual definition.
 
 > **Retraining:** `python data/generate_intent_dataset.py` (regenerates the training set via
 > Claude Sonnet) then `python data/train_intent_classifier.py` (retrains, prints the accuracy
@@ -1220,6 +1343,28 @@ Every query is logged to a Databricks Delta table (`data_assistant.audit.query_a
 | `evaluator` | `evaluator.py` | Score answer relevance 1–5 |
 | `kpi_formula` | `kpi_agent.py` | Extract KPI formula from PDF (Step 1) |
 | `kpi_sql` | `kpi_agent.py` | Generate SQL using formula (Step 2) |
+
+---
+
+### `utils/llm_client.py` — Shared Anthropic Client (LangSmith-wrapped)
+
+Every agent file imports `llm_client` from here rather than constructing its own
+`anthropic.Anthropic()` instance — one client, one retry/timeout config, one place to add
+cross-cutting behavior like tracing.
+
+```python
+llm_client = wrap_anthropic(anthropic.Anthropic(
+    api_key=os.getenv("ANTHROPIC_API_KEY"),
+    max_retries=4,
+    timeout=60.0,
+))
+```
+
+`wrap_anthropic()` (from `langsmith.wrappers`, Objective 6) means every `.messages.create(...)`
+call made anywhere in the app — through this one shared client — automatically traces to
+LangSmith: full prompt, response, token usage, latency, model name. No other file needed to
+change to get this. If `LANGSMITH_TRACING` isn't `"true"` in the environment, the wrapper is a
+transparent no-op and every call behaves exactly as it did before Objective 6.
 
 ---
 

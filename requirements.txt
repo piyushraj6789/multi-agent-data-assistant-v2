@@ -3,6 +3,7 @@ anthropic==0.97.0
 langgraph==1.1.9
 langchain==1.2.15
 langchain-core==1.3.2
+langsmith>=0.7.0   # LangSmith tracing — wraps the Anthropic client + LangGraph's own auto-tracing
 
 # Vector store
 chromadb==1.5.8

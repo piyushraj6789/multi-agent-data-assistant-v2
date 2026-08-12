@@ -35,7 +35,7 @@ def aggregate_metrics(results: list[dict[str, Any]]) -> dict[str, float]:
     n = len(results)
     sql_cases = [r for r in results if r.get("intent") == "sql_query"]
     # Exclude RBAC-blocked cases (eval_score=0) from relevance average
-    scored_cases = [r for r in results if r.get("eval_score", 0) > 0]
+    scored_cases = [r for r in results if (r.get("eval_score") or 0) > 0]
 
     intent_acc = sum(r["intent_ok"] for r in results) / n * 100
     rbac_acc   = sum(r["rbac_ok"]   for r in results) / n * 100
