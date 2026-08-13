@@ -165,6 +165,28 @@ the current question in isolation and had to be taught to fall back to `state["h
    turn). `config/prompts.py: kpi_formula_extract_prompt()` was also updated to prefer a  
    formula already stated earlier in the history over a fresh (weaker) documentation match.
 
+### Related Bugfix — Meta Row Not Repainting After Streaming
+
+Unrelated to the history-blindness bugs above: the meta row under an answer (intent chip,  
+0–5 confidence badge, elapsed time — rendered by `app.py: _render_meta()`) wasn't showing up  
+right after a response finished streaming. It only appeared once the user submitted the next  
+question.
+
+**Cause:** `_render_meta()` (and `_render_feedback()`) were called "live" at the end of the  
+same script run that streamed the answer — appended after the `st.write_stream()` placeholder,  
+inside `st.chat_message`. That live-appended content wasn't reliably staying visible/committed  
+in the chat container. Submitting a new question happened to fix it because that's a full  
+Streamlit rerun, which repaints every past message — including the one just answered — through  
+`_render_chat_history()`, the code path that already renders correctly (it's what draws every  
+message on every subsequent page load).
+
+**Fix:** the question-handling block in `app.py: main()` now ends with an explicit `st.rerun()`  
+right after the live render, so every turn immediately repaints through  
+`_render_chat_history()` instead of waiting on the next question to force that repaint. Safe to  
+call here: by this point `st.chat_input`'s value and `st.session_state.pending_question` are  
+already consumed, so the rerun redraws purely from `st.session_state` — it does not re-invoke  
+the graph, re-stream the answer, or make any extra LLM/API calls.
+
 ### Updated Graph Entry Point
 
 ```
@@ -1434,19 +1456,18 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    Load["Page load<br/>_init_session()"]
-    Sidebar["_render_sidebar()<br/>Role radio buttons + table chips<br/>Session stats + clear chat"]
-    Welcome["_render_welcome()<br/>Header banner<br/>Clickable example questions"]
-    History["_render_chat_history()<br/>Replay past messages"]
-    Input["User types or clicks example question"]
-    Run["_run_agent(question)<br/>agent_graph.invoke()"]
-    Render["_render_result(result)<br/>Error → st.error()<br/>Answer → st.markdown()<br/>Table → st.dataframe()<br/>Chart → st.bar_chart()<br/>SQL → st.expander()<br/>_render_meta() → colour-coded badge + intent chip"]
-    Save["Append to session_state.messages"]
+    Load["Page load<br/>_init_session() + _render_sidebar()<br/>role radio, table chips, dashboard link, clear chat"]
+    History["_render_chat_history()<br/>Replay every past message:<br/>content → _render_dataframe/expander → _render_meta → _render_feedback"]
+    Examples["_render_examples()<br/>(only if no question AND no history yet)"]
+    Input["st.chat_input() or clicked example → question"]
+    Graph["_run_graph(question, role)<br/>agent_graph_base.stream() — data-fetching only"]
+    Stream["st.write_stream(stream_answer(final_state))<br/>+ evaluate_result() for eval_score"]
+    Live["Live render: _render_dataframe / SQL expander /<br/>_render_meta / _render_feedback<br/>+ log_query() → row_id, history append"]
+    Rerun["st.rerun() (bugfix)<br/>forces this turn to repaint via _render_chat_history"]
 
-    Load --> Sidebar
-    Sidebar --> Welcome
-    Welcome --> History
-    History --> Input --> Run --> Render --> Save --> Input
+    Load --> History --> Examples
+    History --> Input --> Graph --> Stream --> Live --> Rerun
+    Rerun -.->|full script re-run| History
 ```
 
 ---

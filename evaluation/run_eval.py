@@ -6,6 +6,8 @@ import time
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from langsmith import trace
+
 from agents.orchestrator import agent_graph
 from evaluation.test_cases import TEST_SUITE
 from evaluation.scorer import score_intent, score_rbac, score_sql, aggregate_metrics
@@ -15,10 +17,14 @@ def _run_case(tc: dict) -> dict:
     """Invoke the agent graph for one test case and return a scored result dict."""
     start = time.time()
     try:
-        state = agent_graph.invoke({
-            "question":  tc["question"],
-            "user_role": tc["user_role"],
-        })
+        # One trace per case — without this, every node's wrapped LLM call
+        # (utils/llm_client.py) shows up as its own disconnected top-level
+        # trace in LangSmith instead of nesting under this case's run.
+        with trace(name=f"eval_case_{tc['id']}", inputs={"question": tc["question"]}):
+            state = agent_graph.invoke({
+                "question":  tc["question"],
+                "user_role": tc["user_role"],
+            })
         error  = state.get("error", "")
         intent = state.get("intent", "")
         answer = state.get("final_answer", "")

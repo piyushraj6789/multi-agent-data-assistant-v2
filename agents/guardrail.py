@@ -44,6 +44,16 @@ OFF_TOPIC_MARKERS: list[str] = [
     "stock price", "bitcoin", "crypto",
 ]
 
+# Requests for code/scripts/tooling still mention domain words (e.g. "write a
+# Python script to scrape TPC-H data") but aren't a question about the data
+# itself — they'd otherwise pass has_domain and only get rejected two SQL
+# self-correction attempts later, wasting API calls. Same override pattern as
+# OFF_TOPIC_MARKERS: blocks regardless of domain keywords present.
+NON_DATA_REQUEST_MARKERS: list[str] = [
+    "write a script", "write a python", "write code", "write a program",
+    "build an app", "build a script", "web scraping", "scrape", "scraper",
+]
+
 _OUT_OF_SCOPE_MSG = (
     "I'm a data assistant for the TPC-H analytics platform. "
     "I can only answer questions about orders, revenue, customers, "
@@ -56,13 +66,16 @@ def check_relevance(state: AgentState) -> AgentState:
     """Block queries with no TPC-H domain terms; let definition questions pass."""
     q = state["question"].lower()
 
-    has_domain   = any(kw in q for kw in DOMAIN_KEYWORDS)
-    has_doc      = any(kw in q for kw in DOC_KEYWORDS)
-    is_off_topic = any(kw in q for kw in OFF_TOPIC_MARKERS)
+    has_domain      = any(kw in q for kw in DOMAIN_KEYWORDS)
+    has_doc         = any(kw in q for kw in DOC_KEYWORDS)
+    is_off_topic    = any(kw in q for kw in OFF_TOPIC_MARKERS)
+    is_non_data_req = any(kw in q for kw in NON_DATA_REQUEST_MARKERS)
 
     # Off-topic markers always block — even when domain words appear incidentally
     # ("weather forecast for the orders region" is still a weather question).
-    if is_off_topic:
+    # Same for code/script requests ("write a Python script to scrape TPC-H
+    # data" mentions the dataset but isn't a data question).
+    if is_off_topic or is_non_data_req:
         return {**state, "intent": "out_of_scope", "final_answer": _OUT_OF_SCOPE_MSG}
 
     if has_domain or has_doc:

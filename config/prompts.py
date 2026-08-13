@@ -57,11 +57,27 @@ def sql_generation_prompt(
         For example: "last year" → 1997, "this year" → 1998, "recent 2 years" → 1997–1998.
         Never use CURRENT_DATE or NOW() for date filtering on this dataset.
 
+        Standard TPC-H join paths (use these; do not invent others):
+        - lineitem.l_orderkey = orders.o_orderkey
+        - lineitem.l_suppkey = supplier.s_suppkey
+        - lineitem.l_partkey = part.p_partkey
+        - orders.o_custkey = customer.c_custkey
+        - customer.c_nationkey = nation.n_nationkey
+        - supplier.s_nationkey = nation.n_nationkey  ← use this path for "by nation" when
+          customer is not in your allowed tables (it gives the same nation breakdown)
+        - nation.n_regionkey = region.r_regionkey
+        - partsupp.ps_suppkey = supplier.s_suppkey, partsupp.ps_partkey = part.p_partkey
+
         Rules:
         - CRITICAL: Use ONLY the tables listed in the schema above. Never reference a table that
           is not explicitly listed, even if the query seems to logically require it.
-          If a join path through an unavailable table comes to mind, find an alternative path
-          using only the tables you have been given.
+          If a join path through an unavailable table comes to mind, use the alternative path
+          above instead (e.g. reach nation via supplier, not customer, when customer is missing).
+        - CRITICAL: Every JOIN must be a real foreign-key equality from the list above
+          (table_a.key = table_b.key). Never join a table using an IN (SELECT ...) subquery,
+          an unrelated column, or any condition that isn't one of the equalities listed —
+          that produces a query that runs without error but returns wrong (often identical
+          per-group) numbers, which is worse than failing outright.
         - Use fully qualified names: catalog.schema.table
         - Databricks SQL syntax only
         - SELECT queries only, no mutations
@@ -144,13 +160,36 @@ def table_name_prompt(table_list: str, question: str) -> str:
     """).strip()
 
 
-def dataframe_summary_prompt(table_str: str, question: str) -> str:
-    """Build the prompt for summarising a SQL result DataFrame in plain English."""
+def dataframe_summary_prompt(
+    table_str: str,
+    question: str,
+    total_rows: int | None = None,
+    shown_rows: int | None = None,
+) -> str:
+    """Build the prompt for summarising a SQL result DataFrame in plain English.
+
+    total_rows/shown_rows: when the table was truncated before reaching this
+    prompt (large result sets are capped for token/cost reasons), the model
+    needs to know that explicitly — otherwise a truncated table that happens
+    to cut off right before a comparison group (e.g. all of 1996's rows fill
+    the cap before any 1997 row appears) reads to the model as "the data for
+    1997 doesn't exist", when it's actually just not shown here.
+    """
+    truncation_note = ""
+    if total_rows is not None and shown_rows is not None and total_rows > shown_rows:
+        truncation_note = (
+            f"\nNote: this table shows the first {shown_rows} of {total_rows} total rows "
+            "(truncated for length, not because the rest doesn't exist). If summarising a "
+            "comparison across a dimension like year, check whether that dimension appears "
+            "fully in what's shown before claiming a value is missing — mention the "
+            "truncation explicitly instead of asking the user to re-run the query.\n"
+        )
+
     return textwrap.dedent(f"""
         Summarise these query results in 2-3 sentences for a business user:
 
         {table_str}
-
+        {truncation_note}
         Original question: {question}
     """).strip()
 
@@ -243,12 +282,23 @@ def kpi_sql_prompt(kpi_formula: str, schema_str: str, question: str) -> str:
         Never use CURRENT_DATE or NOW().
         Q1 = Jan–Mar, Q2 = Apr–Jun, Q3 = Jul–Sep, Q4 = Oct–Dec.
 
+        Standard TPC-H join paths (use these; do not invent others):
+        - lineitem.l_orderkey = orders.o_orderkey
+        - lineitem.l_suppkey = supplier.s_suppkey
+        - orders.o_custkey = customer.c_custkey
+        - supplier.s_nationkey = nation.n_nationkey (use this for "by nation" if customer
+          isn't in your allowed tables)
+        - customer.c_nationkey = nation.n_nationkey
+
         Rules:
         - Translate the formula above into SQL using the schema provided
         - Apply the exact time filter from the question
         - Use fully qualified table names: catalog.schema.table
         - Databricks SQL syntax only, SELECT queries only
         - Return ONLY the SQL query, no explanation
+        - CRITICAL: every JOIN must be a real foreign-key equality from the list above.
+          Never join via an IN (SELECT ...) subquery or an unrelated column — that runs
+          without error but silently returns wrong (often identical per-group) numbers.
         - For percentage/rate formulas use explicit CASE WHEN, NOT boolean casting:
           CORRECT: SUM(CASE WHEN col = 'F' THEN 1 ELSE 0 END) * 100.0 / COUNT(*)
           WRONG:   COUNT(col = 'F') / COUNT(*) * 100

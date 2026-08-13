@@ -5,6 +5,8 @@ import time
 import streamlit as st
 import pandas as pd
 
+from langsmith import trace
+
 from agents.orchestrator import agent_graph_base
 from agents.response_agent import stream_answer
 from agents.evaluator import evaluate_result
@@ -399,45 +401,58 @@ def main() -> None:
         # ── Assistant response ────────────────────────────────────────────────
         with st.chat_message("assistant"):
 
-            # Step 1: run the data-fetching graph (spinner, no LLM answer yet)
-            try:
-                final_state = _run_graph(question, role)
-            except Exception as e:
-                final_state = {"question": question, "user_role": role, "error": str(e)}
-
-            error = final_state.get("error", "")
-
-            # Step 2: store a placeholder entry NOW — before streaming starts.
-            # If Streamlit interrupts the script mid-stream (because the user
-            # submits the next question), this entry already exists in session
-            # state so _render_chat_history() will show it on the next run.
-            placeholder_idx = len(st.session_state.messages)
-            st.session_state.messages = st.session_state.messages + [{
-                "role":       "assistant",
-                "content":    "",          # filled in after streaming
-                "error":      error,
-                "intent":     final_state.get("intent", ""),
-                "dataframe":  final_state.get("result_df"),
-                "sql":        final_state.get("generated_sql", ""),
-                "elapsed":    0,
-                "eval_score": None,
-                "eval_notes": [],
-            }]
-
-            # Step 3: stream the LLM answer token-by-token
-            answer_text = ""
-            if error:
-                st.error(error)
-            else:
+            # Steps 1-4 run inside one LangSmith trace so the graph invocation,
+            # the streamed answer, and the evaluator's judging call all nest
+            # under a single root run instead of showing up as unrelated
+            # top-level traces — wrap_anthropic() alone doesn't bind them
+            # together, since LangGraph nodes and this app-level code aren't
+            # otherwise in the same tracing context.
+            with trace(name="answer_question", inputs={"question": question, "role": role}) as run:
+                # Step 1: run the data-fetching graph (spinner, no LLM answer yet)
                 try:
-                    answer_text = st.write_stream(stream_answer(final_state))
+                    final_state = _run_graph(question, role)
                 except Exception as e:
-                    error = str(e)
-                    st.error(f"Failed to generate response: {e}")
+                    final_state = {"question": question, "user_role": role, "error": str(e)}
 
-            # Step 4: evaluate (needs the full answer text)
-            final_state = {**final_state, "final_answer": answer_text}
-            final_state = evaluate_result(final_state)
+                error = final_state.get("error", "")
+
+                # Step 2: store a placeholder entry NOW — before streaming starts.
+                # If Streamlit interrupts the script mid-stream (because the user
+                # submits the next question), this entry already exists in session
+                # state so _render_chat_history() will show it on the next run.
+                placeholder_idx = len(st.session_state.messages)
+                st.session_state.messages = st.session_state.messages + [{
+                    "role":       "assistant",
+                    "content":    "",          # filled in after streaming
+                    "error":      error,
+                    "intent":     final_state.get("intent", ""),
+                    "dataframe":  final_state.get("result_df"),
+                    "sql":        final_state.get("generated_sql", ""),
+                    "elapsed":    0,
+                    "eval_score": None,
+                    "eval_notes": [],
+                }]
+
+                # Step 3: stream the LLM answer token-by-token
+                answer_text = ""
+                if error:
+                    st.error(error)
+                else:
+                    try:
+                        answer_text = st.write_stream(stream_answer(final_state))
+                    except Exception as e:
+                        error = str(e)
+                        st.error(f"Failed to generate response: {e}")
+
+                # Step 4: evaluate (needs the full answer text)
+                final_state = {**final_state, "final_answer": answer_text}
+                final_state = evaluate_result(final_state)
+
+                run.add_outputs({
+                    "intent":     final_state.get("intent", ""),
+                    "eval_score": final_state.get("eval_score"),
+                    "error":      error,
+                })
 
             elapsed = round(time.time() - t0, 2)
             df      = final_state.get("result_df")
@@ -490,6 +505,15 @@ def main() -> None:
 
             _render_meta(final_msg)
             _render_feedback(placeholder_idx, final_msg)
+
+            # Force one more rerun so this turn repaints through the exact same
+            # path as every past message (_render_chat_history), instead of
+            # staying on the "live" render above. Without this, the meta row
+            # (intent/score/elapsed) rendered here can end up below the chat
+            # container's auto-scroll position and stay invisible until the
+            # next interaction forces a rerun anyway — this makes that repaint
+            # happen immediately instead of waiting on the next question.
+            st.rerun()
 
 
 if __name__ == "__main__":

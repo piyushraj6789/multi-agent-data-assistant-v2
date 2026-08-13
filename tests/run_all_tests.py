@@ -15,6 +15,8 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from langsmith import trace
+
 from agents.orchestrator import agent_graph
 from evaluation.test_cases import TEST_SUITE
 
@@ -35,11 +37,15 @@ def _run(tc: dict) -> dict:
     """Run one test case through the batch graph and return a result dict."""
     start = time.time()
     try:
-        state = agent_graph.invoke({
-            "question":  tc["question"],
-            "user_role": tc["user_role"],
-            "history":   tc.get("history", []),
-        })
+        # One trace per case — binds every node's wrapped LLM call under this
+        # case's run instead of each showing up as a disconnected top-level
+        # trace in LangSmith.
+        with trace(name=f"test_case_{tc['id']}", inputs={"question": tc["question"]}):
+            state = agent_graph.invoke({
+                "question":  tc["question"],
+                "user_role": tc["user_role"],
+                "history":   tc.get("history", []),
+            })
         elapsed = round(time.time() - start, 2)
         intent  = state.get("intent", "")
         answer  = state.get("final_answer", "")

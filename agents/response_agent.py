@@ -12,18 +12,28 @@ from utils.audit import add_tokens
 from utils.llm_client import llm_client as _client
 
 
+_DF_SUMMARY_ROW_CAP = 100  # was 20 — too small for multi-year/multi-group comparisons;
+                           # TPC-H has 25 nations, so this covers up to ~4 years of a
+                           # per-nation breakdown. Beyond that, dataframe_summary_prompt()'s
+                           # truncation_note makes the model say so instead of guessing.
+
+
 def _summarise_dataframe(state: AgentState):
     """Ask Claude Haiku to summarise the SQL result; return (text, usage_object)."""
     df = state.get("result_df")
     if df is None or df.empty:
         return "The query returned no results.", None
 
-    table_str = df.head(20).to_markdown(index=False)
+    shown = df.head(_DF_SUMMARY_ROW_CAP)
+    table_str = shown.to_markdown(index=False)
+    prompt = dataframe_summary_prompt(
+        table_str, state["question"], total_rows=len(df), shown_rows=len(shown),
+    )
     response = _client.messages.create(
         model=APP_MODEL,
         max_tokens=APP_MAX_TOKENS_RESPONSE,
         temperature=TEMP_ANSWER,
-        messages=[{"role": "user", "content": dataframe_summary_prompt(table_str, state["question"])}],
+        messages=[{"role": "user", "content": prompt}],
     )
     return response.content[0].text.strip(), response.usage
 
@@ -84,12 +94,16 @@ def stream_answer(state: AgentState) -> Generator[str, None, None]:
         yield "The query returned no results."
         return
 
-    table_str = df.head(20).to_markdown(index=False)
+    shown = df.head(_DF_SUMMARY_ROW_CAP)
+    table_str = shown.to_markdown(index=False)
+    prompt = dataframe_summary_prompt(
+        table_str, state["question"], total_rows=len(df), shown_rows=len(shown),
+    )
     with _client.messages.stream(
         model=APP_MODEL,
         max_tokens=APP_MAX_TOKENS_RESPONSE,
         temperature=TEMP_ANSWER,
-        messages=[{"role": "user", "content": dataframe_summary_prompt(table_str, state["question"])}],
+        messages=[{"role": "user", "content": prompt}],
     ) as stream:
         yield from stream.text_stream
 
