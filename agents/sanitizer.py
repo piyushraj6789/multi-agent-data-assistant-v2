@@ -7,7 +7,7 @@ and DB error strings at their point of use.
 
 import re
 from agents.state import AgentState
-from config.settings import APP_MAX_INPUT_CHARS, INJECTION_PATTERNS
+from config.settings import APP_MAX_INPUT_CHARS, INJECTION_PATTERNS, PROMPT_LEAK_MARKERS
 
 
 def sanitize_text(text: str, max_chars: int = APP_MAX_INPUT_CHARS) -> str:
@@ -40,6 +40,20 @@ def sanitize_text(text: str, max_chars: int = APP_MAX_INPUT_CHARS) -> str:
         cleaned = cleaned[:max_chars]
 
     return cleaned
+
+
+def detect_prompt_leak(answer: str) -> list[str]:
+    """Output guardrail: return which PROMPT_LEAK_MARKERS (if any) appear in a final answer.
+
+    Checked by evaluator.py against the fully-assembled answer text, after streaming
+    completes. Can't stop a leak from being displayed live (the streaming path yields
+    tokens straight to the UI), but lets the evaluator score it, log it, and app.py
+    keep it out of state["history"] so a leaked fragment can't poison a follow-up turn.
+    """
+    if not answer:
+        return []
+    low = answer.lower()
+    return [marker for marker in PROMPT_LEAK_MARKERS if marker in low]
 
 
 def sanitize_input(state: AgentState) -> AgentState:

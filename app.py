@@ -479,8 +479,10 @@ def main() -> None:
 
             # Objective 1: the UI uses agent_graph_base (streaming graph) which does NOT
             # include format_response, so history is never updated inside the graph.
-            # Always append the completed turn manually here.
-            if answer_text:
+            # Always append the completed turn manually here — except when the output
+            # guardrail (evaluate_result) flagged a prompt/schema leak in this answer;
+            # a leaked fragment must not become "prior context" for the next question.
+            if answer_text and not final_state.get("output_leak"):
                 from config.settings import APP_HISTORY_TURNS
                 prior = list(st.session_state.history)
                 prior.append({

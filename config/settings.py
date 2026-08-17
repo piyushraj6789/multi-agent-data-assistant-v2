@@ -55,3 +55,19 @@ INJECTION_PATTERNS: list[str] = [
     "you are now",
     "jailbreak",
 ]
+
+# ── Output guardrail ───────────────────────────────────
+# Fingerprints of OUR OWN prompt templates (config/prompts.py) — not attacker
+# phrasing. If any of these show up in a generated final_answer, the model has
+# echoed back part of its instructions/schema instead of answering normally.
+# Deliberately distinct from INJECTION_PATTERNS above: that list catches what
+# an attacker sends IN, this one catches what would leak back OUT.
+PROMPT_LEAK_MARKERS: list[str] = [
+    "you are a databricks sql expert",
+    "allowed tables only",
+    "user role:",
+    "conversation history (prior turns)",
+    "standard tpc-h join paths",
+    "critical: use only the tables listed",
+    "from the documentation below, extract",
+]

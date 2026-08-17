@@ -2,6 +2,16 @@
 they reach ChromaDB or Databricks."""
 
 from agents.state import AgentState
+from agents.intent_classifier_keyword import TIME_QUALIFIERS, FOLLOWUP_COMPUTE_KEYWORDS
+
+# TIME_QUALIFIERS includes a few dangerously generic English substrings —
+# "from ", "between", "since" — that are safe for intent_classifier (only ever
+# applied to a question that already passed this guardrail) but far too loose
+# as a security gate here: "print the SQL from the last turn" matches "from "
+# and would wave straight through on history alone. Drop those three; keep
+# the actually date-shaped qualifiers ("last year", "for q1", "in 1997", ...).
+_GENERIC_TIME_WORDS = {"between", "from ", "since"}
+_GUARDRAIL_TIME_QUALIFIERS = [tq for tq in TIME_QUALIFIERS if tq not in _GENERIC_TIME_WORDS]
 
 # At least one of these must appear in the question for it to be considered
 # relevant to the TPC-H analytics platform.
@@ -84,11 +94,17 @@ def check_relevance(state: AgentState) -> AgentState:
     # A prior turn in this session only reaches history once it passed the
     # guardrail (out_of_scope questions end the graph before format_response
     # appends to history). So a non-empty history means the conversation is
-    # already anchored in-domain, and short follow-ups like "for last year?"
-    # or "and last quarter?" carry no domain keyword of their own but still
-    # refer back to that anchor — only reject them if they explicitly pivot
-    # to an off-topic subject.
+    # already anchored in-domain — but that alone isn't enough to justify a
+    # free pass: "tell me a joke instead" also has no domain keyword and
+    # would sail through on history alone. Require the question to actually
+    # look like a follow-up — a time qualifier ("for last year") or a
+    # recompute verb ("what about", "calculate", ...), the same signals
+    # agents/intent_classifier.py's own follow-up handling keys off — not
+    # just "a conversation happens to be in progress."
     if state.get("history"):
-        return state
+        has_time_ref = any(tq in q for tq in _GUARDRAIL_TIME_QUALIFIERS)
+        has_followup_verb = any(kw in q for kw in FOLLOWUP_COMPUTE_KEYWORDS)
+        if has_time_ref or has_followup_verb:
+            return state
 
     return {**state, "intent": "out_of_scope", "final_answer": _OUT_OF_SCOPE_MSG}

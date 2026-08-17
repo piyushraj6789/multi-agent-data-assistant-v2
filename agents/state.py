@@ -19,3 +19,4 @@ class AgentState(TypedDict, total=False):
     token_usage: dict    # accumulated LLM token counts {total_input, total_output, calls}
     kpi_formula: str     # KPI formula extracted from PDF — set by kpi_agent Step 1
     history: list        # Objective 1: last N turns — [{"question", "intent", "generated_sql", "result_summary"}]
+    output_leak: bool    # Output guardrail: True if final_answer matched a PROMPT_LEAK_MARKER

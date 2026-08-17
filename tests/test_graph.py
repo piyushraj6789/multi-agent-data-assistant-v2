@@ -1,12 +1,16 @@
 """End-to-end test runner for Capstone 2 — delegates to run_all_tests.py.
 
-Runs all 38 cases covering: base functionality, multi-turn memory,
-sanitization, write guard, guardrail, intent classification, and RBAC.
+Runs all 40 cases covering: base functionality, multi-turn memory,
+sanitization, write guard, guardrail/jailbreak resistance, intent
+classification, and RBAC.
 
 Run with: python tests/test_graph.py
-Regression gate: 37/38 baseline — AMT3 is a known pre-existing guardrail
-relevance-check flake, tracked separately (see run_all_tests.py). Anything
-below 37 is a real regression.
+Regression gate: 40/40 — AMT3's guardrail history-passthrough bypass is now
+fixed (agents/guardrail.py), not a flake to route around. GRD4/GRD5 are the
+new jailbreak-resistance regression cases for that fix.
+
+Output guardrail (prompt/schema leak detection) is a separate, zero-API-cost
+test — see tests/test_output_guardrail.py.
 """
 
 import sys

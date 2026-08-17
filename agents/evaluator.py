@@ -1,5 +1,6 @@
 """Inline evaluator node — checks the result before it reaches the user."""
 
+from agents.sanitizer import detect_prompt_leak
 from agents.state import AgentState
 from config.prompts import relevance_score_prompt
 from config.settings import APP_MODEL_EVAL, APP_MAX_TOKENS_EVAL, TEMP_EVAL
@@ -50,6 +51,21 @@ def evaluate_result(state: AgentState) -> AgentState:
     # 2. Other execution error
     if error:
         return {**state, "eval_score": 1, "eval_notes": [f"Execution error: {error[:80]}"], "token_usage": tu}
+
+    # 2b. Output guardrail — the answer echoed back a fingerprint of our own prompt
+    # templates (system instructions, schema, allowed-tables list, ...). Treated as
+    # severely as an RBAC violation: score 0, skip the Sonnet relevance call (no point
+    # judging relevance of a leak), and flag it so app.py excludes this turn from
+    # state["history"] — a leaked fragment shouldn't get to poison a follow-up prompt.
+    leaked = detect_prompt_leak(final_answer)
+    if leaked:
+        return {
+            **state,
+            "eval_score": 0,
+            "eval_notes": [f"Possible prompt/schema leak detected: {leaked}"],
+            "output_leak": True,
+            "token_usage": tu,
+        }
 
     # 3. Empty SQL result — penalise relevance score by 1
     has_data = df is not None and not getattr(df, "empty", True)

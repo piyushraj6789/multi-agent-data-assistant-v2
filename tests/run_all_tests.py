@@ -1,12 +1,11 @@
-"""Automated regression runner — 38 Capstone 2 cases.
+"""Automated regression runner — 40 Capstone 2 cases.
 
 Cases are defined once in evaluation/test_cases.py (single source of truth).
 This file only contains the runner logic.
 
 Run with: python tests/run_all_tests.py
-Regression gate: 37/38 baseline — AMT3 is a known pre-existing guardrail
-relevance-check flake, tracked separately. Anything below 37 is a real
-regression, not that known flake.
+Regression gate: 40/40 — AMT3's guardrail bypass is fixed, not a flake to
+route around; GRD4/GRD5 are its jailbreak-resistance regression cases.
 """
 
 import time
@@ -25,12 +24,11 @@ INJECTION_MARKERS = [
     "act as", "no restrictions",
 ]
 
-# Regression gate: the known-good baseline is 37/38 — AMT3 is a pre-existing
-# guardrail relevance-check flake (probabilistic LLM judgment on an
-# injection-only follow-up), unrelated to intent-classifier or KPI-formula
-# work, tracked separately rather than chased here. Any drop below this
-# threshold means an actual regression, not that known flake.
-REGRESSION_THRESHOLD = 37
+# Regression gate: 40/40 — AMT3's previous guardrail bypass is fixed, and
+# GRD4/GRD5 (added alongside that fix) are deterministic keyword-level
+# guardrail checks, not probabilistic LLM judgment, so there's no expected
+# flake left to budget for. Any drop below this threshold is a real regression.
+REGRESSION_THRESHOLD = 40
 
 
 def _run(tc: dict) -> dict:
