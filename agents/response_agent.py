@@ -35,7 +35,7 @@ def _summarise_dataframe(state: AgentState):
         temperature=TEMP_ANSWER,
         messages=[{"role": "user", "content": prompt}],
     )
-    return response.content[0].text.strip(), response.usage
+    return _escape_markdown_math(response.content[0].text.strip()), response.usage
 
 
 def _friendly_error(error: str) -> str:
@@ -52,6 +52,16 @@ def _friendly_error(error: str) -> str:
     if "sql failed after" in low:
         return "The query could not be executed after multiple correction attempts. Please try rephrasing."
     return f"Something went wrong: {error}"
+
+
+def _escape_markdown_math(chunk: str) -> str:
+    """Escape bare '$' so Streamlit's markdown renderer doesn't treat dollar amounts
+    as LaTeX math-mode delimiters (e.g. "$6.84 billion... $6.80 billion" pairs up
+    and renders everything between as a garbled inline formula). Safe to apply
+    per-chunk mid-stream since '$' is always a single character — chunking never
+    splits it.
+    """
+    return chunk.replace("$", "\\$")
 
 
 def stream_answer(state: AgentState) -> Generator[str, None, None]:
@@ -80,7 +90,8 @@ def stream_answer(state: AgentState) -> Generator[str, None, None]:
                 "content": doc_answer_prompt(doc_context, state["question"], history=state.get("history") or []),
             }],
         ) as stream:
-            yield from stream.text_stream
+            for chunk in stream.text_stream:
+                yield _escape_markdown_math(chunk)
         return
 
     # sql_query or kpi_compute — check for errors before trying the DataFrame
