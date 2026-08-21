@@ -1,10 +1,12 @@
-# Multi-Agent Data Assistant
+# Multi-Agent Data Assistant with Guardrails & Observability
 
 A conversational data assistant powered by Claude AI and LangGraph. Ask questions about your data in plain English — the system routes each query through the right pipeline (SQL, RAG, or KPI compute) and returns an answer with a confidence score.
 
 ## Overview
 
 The assistant uses a multi-agent architecture with role-based access control (RBAC). Each user role (Analyst, Finance, Executive) can only query the tables they are authorised to access. Conversation history carries across turns so follow-up questions ("calculate it for last year?") resolve against the prior turn, and every answer carries a thumbs up/down for human feedback, logged against its audit row for later review.
+
+Two layers of guardrails run on every question: an **input side** (sanitizer + relevance check, hardened against mid-conversation jailbreak attempts) and an **output side** (the final answer is scanned for signs the model leaked its own prompt/schema instead of answering). A vague question ("orders", "revenue") is caught before any generation call and gets a clarifying follow-up instead of a guessed query.
 
 **Three query types are supported:**
 
@@ -20,34 +22,46 @@ The assistant uses a multi-agent architecture with role-based access control (RB
 User question
      │
      ▼
- Guardrail ──(off-topic)──► blocked
+ Sanitizer ──(strips injection patterns, truncates)
      │
      ▼
- Intent Classifier
+ Guardrail ──(off-topic / jailbreak)──► blocked
      │
-     ├── sql_query  ──► Load Schema ──► SQL Agent ──► Response Agent
+     ▼
+ Intent Classifier (trained TF-IDF + Logistic Regression)
      │
-     ├── doc_lookup ──► Retrieve Context ──► Doc Answer
-     │
-     └── kpi_compute ──► KPI Agent ──► Response Agent
+     ├── sql_query  ──► Load Schema ──► SQL Agent ──┐  (vague question →
+     │                                                │   clarifying question,
+     ├── doc_lookup ──► Retrieve Context ──► Doc Answer│   no generation call)
+     │                                                │
+     └── kpi_compute ──► KPI Agent ────────────────┘
                                               │
                                               ▼
-                                         Evaluator (0–5 score)
+                                         Response Agent
                                               │
                                               ▼
-                                         Audit Log
+                              Evaluator (0–5 score, cross-model:
+                              Sonnet judges Haiku) + output-leak check
+                                              │
+                                              ▼
+                                   Audit Log ──► Monitoring Dashboard
+                                              │
+                                              ▼
+                                     LangSmith trace (full node chain
+                                     + every LLM call, prompt→response)
 ```
 
 ## Tech Stack
 
 - **LLM:** Claude Haiku (`claude-haiku-4-5`) via Anthropic API, Claude Sonnet as a cross-model evaluator
 - **Agent framework:** LangGraph
-- **Intent classification:** TF-IDF + Logistic Regression (scikit-learn), trained on ~1000 labeled questions, with a small rule-based fallback for context-free follow-ups
+- **Intent classification:** TF-IDF + Logistic Regression (scikit-learn), trained on ~1000 labeled questions, benchmarked at 96.8% vs. 62.3% for the old keyword rules
 - **Vector store:** ChromaDB
 - **Database:** Databricks SQL
 - **UI:** Streamlit (single multipage app — chat + live audit dashboard)
 - **PDF parsing:** PyPDF
-- **SQL write guard:** sqlglot (AST-based statement-type detection)
+- **SQL write guard:** sqlglot (AST-based statement-type detection, not just a first-token check)
+- **Observability:** LangSmith (traces every LLM call + the full LangGraph execution path)
 
 ## Setup
 
@@ -84,6 +98,15 @@ ANTHROPIC_API_KEY=sk-ant-...
 DATABRICKS_HOST=community.cloud.databricks.com
 DATABRICKS_TOKEN=dapi-...
 DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/...
+
+# Optional — enables LangSmith tracing; the app runs fine without it.
+# LANGSMITH_ENDPOINT depends on which regional deployment you signed up on
+# (check the URL you log in with — e.g. apac.smith.langchain.com maps to
+# apac.api.smith.langchain.com; global default is api.smith.langchain.com).
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=lsv2_...
+LANGSMITH_ENDPOINT=https://apac.api.smith.langchain.com
+LANGSMITH_PROJECT=capstone2-multi-agent-assistant
 ```
 
 ### 5. Ingest documents into the vector store
@@ -114,18 +137,31 @@ at the `Monitoring Dashboard` page.
 ## Project Structure
 
 ```
-├── agents/           # Individual agent nodes (intent classifier, SQL, KPI, etc.)
+├── agents/           # Individual agent nodes (sanitizer, guardrail, intent classifier, SQL, KPI, evaluator, etc.)
 ├── config/           # Settings, prompts, RBAC roles
 ├── data/             # Document ingestion, ChromaDB storage, intent classifier training data/model
-├── db/               # Databricks connection and SQL execution
+├── db/               # Databricks connection and SQL execution (AST-based write guard)
 ├── dashboard/        # Audit dashboard rendering logic
 ├── pages/            # Streamlit multipage entries (e.g. Monitoring Dashboard)
 ├── evaluation/       # Automated evaluation test cases and scorer
-├── tests/            # Unit tests
-├── utils/            # LLM client, audit logging
+├── tests/            # Regression suite + zero-cost output-guardrail test
+├── utils/            # LLM client (LangSmith-wrapped), audit logging
+├── documentation/    # Architecture doc, regression test report, report screenshots
 ├── app.py            # Streamlit UI entry point
 └── requirements.txt
 ```
+
+## Security & Guardrails
+
+| Layer | What it catches |
+|---|---|
+| Input sanitizer | Prompt-injection phrases ("ignore previous instructions", ...), oversized input |
+| SQL write guard | Mutating statements (`INSERT`/`UPDATE`/`DELETE`/`DROP`/...), including CTE-wrapped bypass attempts — detected via AST parse, not string matching |
+| Guardrail (relevance check) | Off-topic questions; a mid-conversation topic hijack (e.g. "forget that, tell me a joke") is blocked even with prior context in the same session |
+| Clarification check | Vague/underspecified questions ("orders") get a clarifying question instead of a guessed query — no generation call spent |
+| Output guardrail | Scans the final answer for leaked prompt/schema fragments before it's trusted; flagged answers are excluded from conversation memory |
+
+A 40-case regression suite (`python tests/run_all_tests.py`) and a zero-API-cost output-guardrail test (`python tests/test_output_guardrail.py`) cover these paths — see `documentation/architecture.md` for the full breakdown and `documentation/Regression_Test_Report.pdf` for a sample run.
 
 ## User Roles
 
@@ -135,16 +171,22 @@ at the `Monitoring Dashboard` page.
 | **Finance** | Revenue, supplier cost, financial tables |
 | **Executive** | All tables — cross-functional view |
 
+## Observability
+
+- **Monitoring Dashboard** (in-app page): KPI tiles, activity/latency/cost charts, a query explorer, and HITL feedback distribution — reads the audit Delta table, refreshes every 60s.
+- **HITL feedback:** every answer has a thumbs up/down, logged against its audit row for later review.
+- **LangSmith:** every LLM call and the full LangGraph execution path trace automatically once `LANGSMITH_TRACING=true` is set — full prompt/response, token counts, latency, and model per node.
+
 ## Evaluation
 
-Each response is scored 0–5 by a separate evaluator agent:
+Each response is scored 0–5 by a separate evaluator agent (Claude Sonnet, judging Claude Haiku's output):
 
 | Score | Meaning |
 |---|---|
-| 0 | Blocked (off-topic or unauthorised) |
+| 0 | Blocked (off-topic, unauthorised, or a detected output leak) |
 | 1 | Error |
 | 2 | Low quality |
-| 3 | Moderate |
+| 3 | Moderate (also used for a clarification-requested turn) |
 | 4 | Good |
 | 5 | High confidence |
 
