@@ -20,3 +20,7 @@ class AgentState(TypedDict, total=False):
     kpi_formula: str     # KPI formula extracted from PDF — set by kpi_agent Step 1
     history: list        # Objective 1: last N turns — [{"question", "intent", "generated_sql", "result_summary"}]
     output_leak: bool    # Output guardrail: True if final_answer matched a PROMPT_LEAK_MARKER
+    needs_clarification: bool  # True if sql_agent/kpi_agent skipped generation for an
+                               # underspecified question (see is_underspecified()) — final_answer
+                               # is already set to a clarifying prompt; response_agent should not
+                               # overwrite it by summarising a (nonexistent) result_df

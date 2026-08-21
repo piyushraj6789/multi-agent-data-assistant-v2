@@ -1,7 +1,8 @@
 """Hybrid RAG+SQL agent: extract KPI formula from PDF context, then compute via SQL."""
 
+from agents.intent_classifier_keyword import is_underspecified
+from agents.sql_agent import _CLARIFY_MSG, _build_schema_str, _check_rbac
 from agents.state import AgentState
-from agents.sql_agent import _build_schema_str, _check_rbac
 from config.prompts import kpi_formula_extract_prompt, kpi_sql_prompt
 from config.settings import APP_MODEL, APP_MAX_TOKENS_ANSWER, APP_MAX_TOKENS_SQL, TEMP_SQL, TEMP_ANSWER
 from db.execute import run_with_correction, extract_sql
@@ -42,6 +43,12 @@ def run_kpi_agent(state: AgentState) -> AgentState:
     """Run the two-step KPI agent: formula extraction → SQL generation → execution."""
     tu = state.get("token_usage") or {}
     try:
+        # Pre-check: a bare/vague question gives us nothing concrete to compute —
+        # ask for clarification instead of guessing. Zero API cost.
+        if is_underspecified(state["question"]):
+            return {**state, "generated_sql": "", "result_df": None, "error": "",
+                    "final_answer": _CLARIFY_MSG, "needs_clarification": True, "token_usage": tu}
+
         doc_context = state.get("doc_context", "")
         schema_str = _build_schema_str(state.get("schema", {}))
 

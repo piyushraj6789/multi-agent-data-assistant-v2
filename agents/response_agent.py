@@ -100,6 +100,10 @@ def stream_answer(state: AgentState) -> Generator[str, None, None]:
         yield _friendly_error(error)
         return
 
+    if state.get("needs_clarification"):
+        yield state.get("final_answer", "Could you rephrase that with more detail?")
+        return
+
     df = state.get("result_df")
     if df is None or df.empty:
         yield "The query returned no results."
@@ -116,7 +120,8 @@ def stream_answer(state: AgentState) -> Generator[str, None, None]:
         temperature=TEMP_ANSWER,
         messages=[{"role": "user", "content": prompt}],
     ) as stream:
-        yield from stream.text_stream
+        for chunk in stream.text_stream:
+            yield _escape_markdown_math(chunk)
 
 
 def format_response(state: AgentState) -> AgentState:
@@ -136,6 +141,9 @@ def format_response(state: AgentState) -> AgentState:
 
     elif intent == "schema_lookup":
         final_answer = state.get("final_answer", "No schema information available.")
+
+    elif state.get("needs_clarification"):
+        final_answer = state.get("final_answer", "Could you rephrase that with more detail?")
 
     else:  # sql_query or kpi_compute — both produce a result_df
         final_answer, usage = _summarise_dataframe(state)

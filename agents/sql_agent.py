@@ -1,5 +1,6 @@
 """Generate a Databricks SQL query from a natural language question using Claude Haiku."""
 
+from agents.intent_classifier_keyword import is_underspecified
 from agents.state import AgentState
 from config.rbac import get_allowed_tables, check_metric_access
 from config.prompts import sql_generation_prompt
@@ -7,6 +8,12 @@ from db.execute import run_with_correction, extract_sql, WriteGuardError, _check
 from config.settings import APP_MODEL, APP_MAX_TOKENS_SQL, TEMP_SQL
 from utils.audit import add_tokens
 from utils.llm_client import llm_client as _client
+
+_CLARIFY_MSG = (
+    "That's a bit broad for me to turn into a specific query — could you say more? "
+    "For example: a metric (total revenue, order count), a breakdown (by nation, by year), "
+    "or a time period (1997, Q1 1998)."
+)
 
 
 def _build_schema_str(schema: dict) -> str:
@@ -60,6 +67,12 @@ def run_sql_agent(state: AgentState) -> AgentState:
     """Generate SQL with Haiku, validate RBAC, execute with self-correction, store DataFrame."""
     tu = state.get("token_usage") or {}
     try:
+        # Pre-check: a bare/vague question ("orders") gives us nothing concrete to
+        # compute — ask for clarification instead of guessing a query. Zero API cost.
+        if is_underspecified(state["question"]):
+            return {**state, "generated_sql": "", "result_df": None, "error": "",
+                    "final_answer": _CLARIFY_MSG, "needs_clarification": True, "token_usage": tu}
+
         # Pre-check: if the user typed raw mutation SQL as the question, block before Haiku runs.
         # Without this, Haiku refuses to generate the SQL → produces a refusal string →
         # the correction loop converts that refusal into a valid SELECT → mutation bypassed.

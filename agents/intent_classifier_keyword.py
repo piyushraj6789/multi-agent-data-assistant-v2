@@ -67,6 +67,7 @@ KPI_NAMES: list[str] = _load_kpi_names()
 # wants the same metric recomputed, not a fresh ad-hoc query.
 FOLLOWUP_COMPUTE_KEYWORDS: list[str] = [
     "calculate", "compute", "what about", "how about", "now for", "and for", "same for",
+    "compare",
 ]
 
 
@@ -75,6 +76,26 @@ def _word_match(kw: str, text: str) -> bool:
     if " " in kw:
         return kw in text
     return bool(re.search(r"\b" + re.escape(kw) + r"\b", text))
+
+
+# Below this word count, a question needs an explicit metric/aggregation/KPI
+# signal to be worth generating SQL for — otherwise a bare table name like
+# "orders" gives the SQL/KPI agents nothing concrete to compute and they'd
+# just be guessing. Reuses SQL_OVERRIDE_KEYWORDS/KPI_NAMES rather than a new list.
+_MIN_SPECIFIC_WORDS = 3
+
+
+def is_underspecified(question: str) -> bool:
+    """True if a short question has no aggregation/metric/KPI signal to act on."""
+    q = question.lower()
+    if len(re.findall(r"[a-z0-9']+", q)) > _MIN_SPECIFIC_WORDS:
+        return False
+    has_signal = (
+        any(kw in q for kw in KPI_NAMES)
+        or any(_word_match(kw, q) for kw in SQL_OVERRIDE_KEYWORDS)
+        or any(kw in q for kw in DOC_KEYWORDS)
+    )
+    return not has_signal
 
 
 def classify_intent(state: AgentState) -> AgentState:

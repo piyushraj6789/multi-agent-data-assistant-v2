@@ -44,6 +44,11 @@ def evaluate_result(state: AgentState) -> AgentState:
     if intent == "out_of_scope":
         return {**state, "eval_score": 2, "eval_notes": ["Question outside data domain"], "token_usage": tu}
 
+    # 0b. Underspecified — sql_agent/kpi_agent asked for clarification instead of
+    # guessing a query; nothing to judge relevance of yet, no LLM call needed.
+    if state.get("needs_clarification"):
+        return {**state, "eval_score": 3, "eval_notes": ["Asked for clarification — question too vague"], "token_usage": tu}
+
     # 1. RBAC violation — hard block, score 0
     if "rbac violation" in error.lower():
         return {**state, "eval_score": 0, "eval_notes": ["RBAC violation — access denied"], "token_usage": tu}

@@ -54,8 +54,16 @@ def sql_generation_prompt(
         IMPORTANT — Dataset date range:
         The samples.tpch dataset contains data with order dates between 1992 and 1998.
         There is NO data beyond 1998. Interpret relative time references against 1998.
-        For example: "last year" → 1997, "this year" → 1998, "recent 2 years" → 1997–1998.
+        For example: "last year" → 1997, "this year" → 1998, "recent 2 years" → 1997–1998,
+        "this quarter" → Q4 1998, "last quarter" → Q3 1998 (Q4 1998 is the most recent
+        quarter with data — treat it as "now" for quarter-relative phrasing the same way
+        1998 is treated as "now" for year-relative phrasing).
         Never use CURRENT_DATE or NOW() for date filtering on this dataset.
+        Never use INTERVAL ... QUARTER — Databricks SQL doesn't support QUARTER as an
+        interval unit. Write out the explicit year/quarter condition instead, e.g.
+        (YEAR(col) = 1998 AND QUARTER(col) = 4) OR (YEAR(col) = 1998 AND QUARTER(col) = 3).
+        Use only ASCII comparison operators (>=, <=, >, <, =) — never Unicode symbols
+        like ≥ or ≤, which Databricks SQL cannot parse.
 
         Standard TPC-H join paths (use these; do not invent others):
         - lineitem.l_orderkey = orders.o_orderkey
@@ -279,8 +287,15 @@ def kpi_sql_prompt(kpi_formula: str, schema_str: str, question: str) -> str:
 
         IMPORTANT — Dataset date range:
         The samples.tpch dataset contains data with order dates between 1992 and 1998.
+        There is NO data beyond 1998. Interpret relative time references against 1998:
+        "last year" → 1997, "this year" → 1998, "this quarter" → Q4 1998, "last quarter"
+        → Q3 1998 (Q4 1998 is the most recent quarter with data).
         Never use CURRENT_DATE or NOW().
         Q1 = Jan–Mar, Q2 = Apr–Jun, Q3 = Jul–Sep, Q4 = Oct–Dec.
+        Never use INTERVAL ... QUARTER — Databricks SQL doesn't support QUARTER as an
+        interval unit. Write out the explicit year/quarter condition instead.
+        Use only ASCII comparison operators (>=, <=, >, <, =) — never Unicode symbols
+        like ≥ or ≤.
 
         Standard TPC-H join paths (use these; do not invent others):
         - lineitem.l_orderkey = orders.o_orderkey
